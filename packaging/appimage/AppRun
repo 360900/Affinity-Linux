@@ -1,0 +1,7 @@
+#!/bin/sh
+# No arguments: GUI. Any arguments: CLI, e.g. `./Affinity_Linux.AppImage install --dry-run`.
+here="$(dirname "$(readlink -f "$0")")"
+if [ "$#" -eq 0 ]; then
+    exec "$here/usr/bin/affinity-linux-gui"
+fi
+exec "$here/usr/bin/affinity-linux" "$@"

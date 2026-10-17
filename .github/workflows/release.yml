@@ -1,0 +1,35 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      - run: cargo install --locked cargo-deb cargo-generate-rpm
+      - run: cargo build --release --locked --workspace
+      - run: cargo deb -p affinity-linux --no-build
+      - run: cargo generate-rpm -p crates/cli
+      - run: packaging/appimage/build.sh
+      - name: tarball
+        run: |
+          dir=affinity-linux-${GITHUB_REF_NAME#v}-x86_64
+          mkdir -p $dir/target/release
+          cp target/release/affinity-linux target/release/affinity-linux-gui $dir/target/release/
+          cp -r Makefile LICENSE README.md packaging $dir/
+          tar czf $dir.tar.gz $dir
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --generate-notes \
+            target/debian/*.deb target/generate-rpm/*.rpm affinity-linux-*.tar.gz \
+            target/appimage/*.AppImage

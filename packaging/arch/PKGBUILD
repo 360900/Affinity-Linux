@@ -1,0 +1,36 @@
+# Maintainer: 360900 <ziyad.koca@hotmail.com>
+pkgname=affinity-linux
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Installer and launcher for Affinity v3 on Linux'
+arch=('x86_64')
+url='https://github.com/360900/Affinity-Linux'
+license=('GPL-3.0-or-later')
+depends=('fontconfig' 'gcc-libs' 'glibc' 'libxkbcommon' 'libglvnd')
+makedepends=('cargo')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd Affinity-Linux-$pkgver
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd Affinity-Linux-$pkgver
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --workspace
+}
+
+check() {
+  cd Affinity-Linux-$pkgver
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --workspace
+}
+
+package() {
+  cd Affinity-Linux-$pkgver
+  make DESTDIR="$pkgdir" PREFIX=/usr install
+}

@@ -1,6 +1,8 @@
 [package]
 name = "affinity-linux"
 version.workspace = true
+repository = "https://github.com/360900/Affinity-Linux"
+description = "Installer and launcher for Affinity v3 on Linux"
 edition.workspace = true
 license.workspace = true
 
@@ -13,3 +15,33 @@ affinity-linux-core = { path = "../core" }
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+
+[package.metadata.deb]
+name = "affinity-linux"
+maintainer = "360900 <ziyad.koca@hotmail.com>"
+extended-description = "Installs and launches Affinity v3 on Linux through Wine."
+section = "utils"
+depends = "$auto, libxkbcommon0, libegl1"
+assets = [
+    ["target/release/affinity-linux", "usr/bin/", "755"],
+    ["target/release/affinity-linux-gui", "usr/bin/", "755"],
+    ["../../packaging/io.github._360900.AffinityLinux.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/affinity-linux.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../../packaging/io.github._360900.AffinityLinux.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["../../README.md", "usr/share/doc/affinity-linux/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "affinity-linux"
+assets = [
+    { source = "target/release/affinity-linux", dest = "/usr/bin/affinity-linux", mode = "755" },
+    { source = "target/release/affinity-linux-gui", dest = "/usr/bin/affinity-linux-gui", mode = "755" },
+    { source = "../../packaging/io.github._360900.AffinityLinux.desktop", dest = "/usr/share/applications/io.github._360900.AffinityLinux.desktop", mode = "644" },
+    { source = "../../packaging/affinity-linux.svg", dest = "/usr/share/icons/hicolor/scalable/apps/affinity-linux.svg", mode = "644" },
+    { source = "../../packaging/io.github._360900.AffinityLinux.metainfo.xml", dest = "/usr/share/metainfo/io.github._360900.AffinityLinux.metainfo.xml", mode = "644" },
+    { source = "../../LICENSE", dest = "/usr/share/licenses/affinity-linux/LICENSE", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+"libxkbcommon.so.0()(64bit)" = "*"
+"libEGL.so.1()(64bit)" = "*"

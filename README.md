@@ -15,6 +15,50 @@ implementation of the Wine pipeline.
 - Desktop entries, corruption guard, live log and visible errors
 - Every action supports `--dry-run`
 
+## Install
+
+Packages are attached to each [release](https://github.com/360900/Affinity-Linux/releases).
+
+Arch and derivatives:
+
+```sh
+git clone https://github.com/360900/Affinity-Linux
+cd Affinity-Linux/packaging/arch && makepkg -si
+```
+
+Debian, Ubuntu and derivatives:
+
+```sh
+sudo apt install ./affinity-linux_<version>-1_amd64.deb
+```
+
+Fedora:
+
+```sh
+sudo dnf install ./affinity-linux-<version>-1.x86_64.rpm
+```
+
+openSUSE:
+
+```sh
+sudo zypper install ./affinity-linux-<version>-1.x86_64.rpm
+```
+
+Any distro, AppImage (no arguments opens the GUI, arguments go to the CLI):
+
+```sh
+chmod +x Affinity_Linux-<version>-x86_64.AppImage
+./Affinity_Linux-<version>-x86_64.AppImage
+./Affinity_Linux-<version>-x86_64.AppImage install --dry-run
+```
+
+Other distros, from the release tarball or a source build:
+
+```sh
+sudo make install            # PREFIX=/usr/local by default
+sudo make uninstall
+```
+
 ## Build
 
 Requires Rust 1.85+.
@@ -22,6 +66,9 @@ Requires Rust 1.85+.
 ```sh
 cargo build --release --workspace
 ```
+
+Building the GUI needs fontconfig headers (`libfontconfig1-dev`,
+`fontconfig-devel`).
 
 ## Usage
 
@@ -52,6 +99,7 @@ diagnostics: `doctor`, `deps`, `wine-setup`.
 | `crates/cli` | `affinity-linux` CLI, used by the desktop entry |
 | `crates/app` | Slint GUI |
 | `ui/main.slint` | Window layout |
+| `packaging` | Desktop entry, icon, PKGBUILD, AppImage |
 
 ## Files
 
@@ -60,4 +108,4 @@ diagnostics: `doctor`, `deps`, `wine-setup`.
 
 ## License
 
-MIT
+GPL-3.0-or-later. See [LICENSE](LICENSE).

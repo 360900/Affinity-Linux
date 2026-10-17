@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Affinity Linux
+Comment=Install, update and repair Affinity
+Exec=affinity-linux-gui
+Icon=affinity-linux
+Terminal=false
+Categories=Utility;
