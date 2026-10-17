@@ -1,57 +1,63 @@
 # Affinity Linux
 
-One-click installer, launcher, repair, update and uninstall app for Affinity v3
-on Linux, built in Rust with a Slint interface. Clean-room implementation of the
-Wine pipeline.
+One-click installer and launcher for Affinity v3 on Linux. Handles system
+dependencies, Wine, winetricks, .NET 4.8, GPU backends and post-install fixes,
+then keeps the install healthy with repair, update and uninstall.
 
-## Status
+Written in Rust with a native Slint (Fluent) interface. Clean-room
+implementation of the Wine pipeline.
 
-| Milestone | Scope | State |
-| --- | --- | --- |
-| M1 | Workspace, config, manifest, runner, distro/GPU/dependency check, GUI shell | done |
-| M2 | Dependency installation for Arch, Ubuntu-family, Fedora, openSUSE | done |
-| M3 | Wine bootstrap, winetricks, dotnet48 verification | done |
-| M4 | Affinity installer, MSI fallback, patches, PluginLoader, facades, WebView2 | done |
-| M5 | GPU backends, launch environment, corruption guard, uninstall, full GUI wiring | done |
-| M6 | One-click UI redesign, repair and update flows, advanced panel | done |
-| M7 | Native Fluent UI (light/dark), compact layout, visible errors, live log | done |
+## Features
+
+- Dependency installation for Arch, Ubuntu-family, Fedora and openSUSE
+- Wine prefix bootstrap with dotnet48 verification
+- GPU acceleration via vkd3d-proton or DXVK, optional OpenCL
+- Desktop entries, corruption guard, live log and visible errors
+- Every action supports `--dry-run`
 
 ## Build
 
-```sh
-cargo build --workspace
-```
-
-## Run
+Requires Rust 1.85+.
 
 ```sh
-cargo run -p affinity-linux -- install --dry-run
-cargo run -p affinity-linux -- install
-cargo run -p affinity-linux -- update --dry-run
-cargo run -p affinity-linux -- update
-cargo run -p affinity-linux -- repair --dry-run
-cargo run -p affinity-linux -- repair
-cargo run -p affinity-linux -- launch --dry-run
-cargo run -p affinity-linux -- launch
-cargo run -p affinity-linux -- uninstall --dry-run
-cargo run -p affinity-linux -- uninstall
-cargo run -p affinity-linux-gui
+cargo build --release --workspace
 ```
 
-Diagnostics remain available but hidden from the main help:
+## Usage
+
+GUI:
 
 ```sh
-cargo run -p affinity-linux -- doctor
-cargo run -p affinity-linux -- deps --dry-run
-cargo run -p affinity-linux -- wine-setup --dry-run
+cargo run --release -p affinity-linux-gui
 ```
+
+CLI:
+
+```sh
+affinity-linux install     # --installer <setup.exe>, --gpu vkd3d|dxvk, --opencl true|false
+affinity-linux launch
+affinity-linux update
+affinity-linux repair      # re-apply fixes without reinstalling
+affinity-linux uninstall
+```
+
+Add `--dry-run` to preview changes and `--yes` to skip prompts. Hidden
+diagnostics: `doctor`, `deps`, `wine-setup`.
 
 ## Layout
 
-- `crates/core`: headless engine (no GUI dependencies)
-- `crates/cli`: `affinity-linux` CLI, also used by the desktop entry
-- `crates/app`: Slint GUI
-- `ui/main.slint`: window layout
+| Path | Purpose |
+| --- | --- |
+| `crates/core` | Headless engine |
+| `crates/cli` | `affinity-linux` CLI, used by the desktop entry |
+| `crates/app` | Slint GUI |
+| `ui/main.slint` | Window layout |
 
-State lives in `~/.config/affinity-linux/config.toml` and inside the Wine prefix
-(`~/.AffinityLinux` by default).
+## Files
+
+- Config: `~/.config/affinity-linux/config.toml` (respects `XDG_CONFIG_HOME`)
+- Wine prefix: `~/.AffinityLinux` (override with `--prefix`)
+
+## License
+
+MIT
