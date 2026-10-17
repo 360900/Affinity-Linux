@@ -1,0 +1,154 @@
+import { Button, ListView } from "std-widgets.slint";
+
+export struct LogLine {
+    text: string,
+    error: bool,
+}
+
+component InfoRow inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> value;
+    spacing: 10px;
+    Text {
+        text: root.title;
+        width: 88px;
+        color: #8b929c;
+        font-size: 12px;
+    }
+    Text {
+        text: root.value;
+        horizontal-stretch: 1;
+        color: #e5e7eb;
+        font-size: 13px;
+        wrap: word-wrap;
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "Affinity Linux";
+    preferred-width: 1000px;
+    preferred-height: 700px;
+    min-width: 780px;
+    min-height: 540px;
+    background: #16171a;
+
+    in-out property <string> state-text: "Checking system...";
+    in-out property <string> distro-text: "-";
+    in-out property <string> gpu-text: "-";
+    in-out property <string> wine-text: "-";
+    in-out property <string> deps-text: "-";
+    in-out property <string> prefix-text: "-";
+    in-out property <[LogLine]> logs: [];
+    in property <bool> installed: false;
+    in property <bool> busy: false;
+
+    callback install-clicked();
+    callback launch-clicked();
+    callback update-clicked();
+    callback repair-clicked();
+    callback uninstall-clicked();
+    callback recheck-clicked();
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            spacing: 12px;
+            VerticalLayout {
+                spacing: 3px;
+                Text {
+                    text: "Affinity Linux";
+                    color: #f3f4f6;
+                    font-size: 24px;
+                    font-weight: 700;
+                }
+                Text {
+                    text: root.state-text;
+                    color: #9ca3af;
+                    font-size: 13px;
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: "Re-check system";
+                clicked => { root.recheck-clicked(); }
+            }
+        }
+
+        Rectangle {
+            background: #1d1f24;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: #2c2f36;
+            VerticalLayout {
+                padding: 14px;
+                spacing: 7px;
+                InfoRow { title: "Distro"; value: root.distro-text; }
+                InfoRow { title: "GPU"; value: root.gpu-text; }
+                InfoRow { title: "Wine build"; value: root.wine-text; }
+                InfoRow { title: "Dependencies"; value: root.deps-text; }
+                InfoRow { title: "Prefix"; value: root.prefix-text; }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: root.installed ? "Launch Affinity" : "Install Affinity";
+                enabled: !root.busy;
+                clicked => {
+                    if (root.installed) {
+                        root.launch-clicked();
+                    } else {
+                        root.install-clicked();
+                    }
+                }
+            }
+            Button { text: "Update"; enabled: false; clicked => { root.update-clicked(); } }
+            Button { text: "Repair"; enabled: false; clicked => { root.repair-clicked(); } }
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: "Uninstall";
+                enabled: root.installed && !root.busy;
+                clicked => { root.uninstall-clicked(); }
+            }
+        }
+
+        Rectangle {
+            background: #0e0f12;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: #2c2f36;
+            vertical-stretch: 1;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 6px;
+                HorizontalLayout {
+                    Text {
+                        text: "Log";
+                        color: #9ca3af;
+                        font-size: 12px;
+                        font-weight: 600;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: root.busy ? "working..." : "system check output";
+                        color: #5f6672;
+                        font-size: 11px;
+                    }
+                }
+                ListView {
+                    vertical-stretch: 1;
+                    for line in root.logs : Text {
+                        text: line.text;
+                        color: line.error ? #f87171 : #cbd5e1;
+                        font-family: "monospace";
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}
