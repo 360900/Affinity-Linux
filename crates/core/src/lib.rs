@@ -2,11 +2,18 @@
 
 pub mod config;
 pub mod deps;
+pub mod desktop;
 pub mod distro;
 pub mod doctor;
+pub mod extras;
 pub mod gpu;
+pub mod http;
+pub mod install;
+pub mod installer;
+mod journal;
 pub mod manifest;
 pub mod packages;
+pub mod patch;
 pub mod runner;
 pub mod wine;
 

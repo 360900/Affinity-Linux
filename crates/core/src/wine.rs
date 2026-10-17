@@ -4,8 +4,7 @@
 //! This module downloads the build, links it into the prefix, installs the
 //! winetricks runtimes, sets Windows 11 and verifies .NET Framework 4.8.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -13,6 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use crate::distro::Family;
+use crate::journal::Report;
 use crate::manifest::now_epoch;
 use crate::runner::{self, RunOptions, RunResult, Stream};
 use crate::{WINE_DIR_NAME, app_exe, deps};
@@ -57,10 +57,7 @@ where
     F: FnMut(Stream, &str),
 {
     let mut sink = on_line;
-    let mut report = Report {
-        log: opts.log_path.clone(),
-        sink: &mut sink,
-    };
+    let mut report = Report::new(opts.log_path.clone(), &mut sink);
     let prefix = &opts.prefix;
 
     report.info(format!("Wine setup for {}", prefix.display()));
@@ -686,34 +683,6 @@ fn shell_quote(text: &str) -> String {
         return text.to_string();
     }
     format!("'{}'", text.replace('\'', "'\\''"))
-}
-
-struct Report<'a> {
-    log: Option<PathBuf>,
-    sink: &'a mut dyn FnMut(Stream, &str),
-}
-
-impl Report<'_> {
-    fn line(&mut self, stream: Stream, text: impl AsRef<str>) {
-        let text = text.as_ref();
-        if let Some(path) = &self.log {
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-                let _ = writeln!(file, "{text}");
-            }
-        }
-        (self.sink)(stream, text);
-    }
-
-    fn info(&mut self, text: impl AsRef<str>) {
-        self.line(Stream::Stdout, text);
-    }
-
-    fn warn(&mut self, text: impl AsRef<str>) {
-        self.line(Stream::Stderr, format!("warning: {}", text.as_ref()));
-    }
 }
 
 #[cfg(test)]
