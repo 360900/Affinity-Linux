@@ -4,7 +4,7 @@
 //! through here so the GUI gets one unified log and hangs are detected.
 
 use std::collections::VecDeque;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
@@ -26,12 +26,16 @@ pub enum Stream {
 pub struct RunOptions {
     /// Kill the child when it produces no output for this long.
     pub stall_timeout: Option<Duration>,
-    /// Tee every line into this file (created or truncated).
+    /// Tee every line into this file (created or truncated unless `log_append`).
     pub log_path: Option<PathBuf>,
+    /// Append to an existing log instead of truncating it.
+    pub log_append: bool,
     pub envs: Vec<(String, String)>,
     pub cwd: Option<PathBuf>,
     /// Forward lines to the callback.
     pub echo: bool,
+    /// Let the child use the terminal's stdin (needed for sudo password prompts).
+    pub inherit_stdin: bool,
 }
 
 impl Default for RunOptions {
@@ -39,9 +43,11 @@ impl Default for RunOptions {
         Self {
             stall_timeout: None,
             log_path: None,
+            log_append: false,
             envs: Vec::new(),
             cwd: None,
             echo: true,
+            inherit_stdin: false,
         }
     }
 }
@@ -58,6 +64,18 @@ impl RunOptions {
 
     pub fn log(mut self, path: impl Into<PathBuf>) -> Self {
         self.log_path = Some(path.into());
+        self
+    }
+
+    /// Keep existing log contents and append new lines to the same file.
+    pub fn log_append(mut self) -> Self {
+        self.log_append = true;
+        self
+    }
+
+    /// Inherit stdin, so interactive prompts (sudo) reach the terminal.
+    pub fn inherit_stdin(mut self) -> Self {
+        self.inherit_stdin = true;
         self
     }
 
@@ -118,7 +136,12 @@ where
     for (key, value) in &opts.envs {
         cmd.env(key, value);
     }
-    cmd.stdin(Stdio::null())
+    let stdin = if opts.inherit_stdin {
+        Stdio::inherit()
+    } else {
+        Stdio::null()
+    };
+    cmd.stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -140,7 +163,18 @@ where
                 fs::create_dir_all(parent)
                     .with_context(|| format!("creating {}", parent.display()))?;
             }
-            Some(File::create(path).with_context(|| format!("creating {}", path.display()))?)
+            let mut options = OpenOptions::new();
+            options.create(true).write(true);
+            if opts.log_append {
+                options.append(true);
+            } else {
+                options.truncate(true);
+            }
+            Some(
+                options
+                    .open(path)
+                    .with_context(|| format!("opening {}", path.display()))?,
+            )
         }
         None => None,
     };

@@ -1,8 +1,16 @@
-use anyhow::Result;
+use std::fs;
+use std::io::{self, Write};
+
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
 use affinity_linux_core::config::Config;
+use affinity_linux_core::deps;
+use affinity_linux_core::distro::OsRelease;
 use affinity_linux_core::doctor::{self, DoctorReport};
+use affinity_linux_core::manifest::now_epoch;
+use affinity_linux_core::packages::{self, Elevation, PlanRunOptions};
+use affinity_linux_core::runner::Stream;
 
 #[derive(Parser)]
 #[command(
@@ -22,6 +30,18 @@ enum Command {
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Check and install system packages needed by the installer
+    Deps {
+        /// Print the planned commands without changing the system
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask for confirmation
+        #[arg(long)]
+        yes: bool,
+        /// Elevate with pkexec instead of sudo
+        #[arg(long)]
+        pkexec: bool,
     },
     /// Install Affinity v3 into the configured prefix
     Install {
@@ -57,6 +77,11 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Deps {
+            dry_run,
+            yes,
+            pkexec,
+        } => run_deps(&cfg, dry_run, yes, pkexec),
         Command::Install { dry_run: _ } => {
             anyhow::bail!(
                 "install is not implemented yet (M2-M4); run `affinity-linux doctor` for the system check"
@@ -88,6 +113,12 @@ fn print_report(report: &DoctorReport) {
         for gpu in &report.gpus {
             println!("  gpu           {} [{}]", gpu.name, gpu.vendor.label());
         }
+    }
+
+    if report.vulkan_icds.is_empty() {
+        println!("  vulkan        no ICD manifest found (install a Vulkan driver)");
+    } else {
+        println!("  vulkan        {}", report.vulkan_icds.join(", "));
     }
 
     println!(
@@ -124,7 +155,122 @@ fn print_report(report: &DoctorReport) {
         );
     }
 
+    for note in &report.package_notes {
+        println!("  note          {note}");
+    }
+
     for error in &report.errors {
         println!("  error         {error}");
+    }
+}
+
+fn run_deps(cfg: &Config, dry_run: bool, yes: bool, pkexec: bool) -> Result<()> {
+    let os = OsRelease::detect()?;
+    let plan = packages::plan(&os);
+
+    println!(
+        "dependency plan for {} ({})",
+        os.name(),
+        plan.family.label()
+    );
+    println!("  flavor  {}", plan.flavor);
+    println!("  steps   {}", plan.steps.len());
+    for note in &plan.notes {
+        println!("  note    {note}");
+    }
+
+    if plan.steps.is_empty() {
+        let checks = deps::check_all();
+        let missing = deps::missing(&checks);
+        if missing.is_empty() {
+            println!("all required dependencies are present");
+            return Ok(());
+        }
+        bail!(
+            "no automatic plan for this distribution; still missing: {}",
+            missing
+                .iter()
+                .map(|dep| dep.command)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    let print_line = |stream: Stream, line: &str| match stream {
+        Stream::Stdout => println!("{line}"),
+        Stream::Stderr => eprintln!("{line}"),
+    };
+
+    if dry_run {
+        let options = PlanRunOptions {
+            dry_run: true,
+            elevation: packages::default_elevation(),
+            log_path: None,
+        };
+        packages::run_plan(&plan, &options, print_line)?;
+        return Ok(());
+    }
+
+    if !yes {
+        print!("Proceed? [y/N] ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            println!("aborted");
+            return Ok(());
+        }
+    }
+
+    let elevation = if pkexec {
+        Elevation::Pkexec
+    } else if packages::is_root() {
+        Elevation::None
+    } else {
+        Elevation::Sudo
+    };
+    match elevation {
+        Elevation::Pkexec if deps::which("pkexec").is_none() => {
+            bail!("pkexec was not found on PATH")
+        }
+        Elevation::Sudo if deps::which("sudo").is_none() => {
+            bail!("sudo was not found; run as root or install sudo")
+        }
+        _ => {}
+    }
+
+    let log_dir = cfg.prefix.join("logs");
+    fs::create_dir_all(&log_dir)?;
+    let log_path = log_dir.join(format!("deps-{}.log", now_epoch()));
+    println!("log     {}", log_path.display());
+
+    let options = PlanRunOptions {
+        dry_run: false,
+        elevation,
+        log_path: Some(log_path),
+    };
+    let outcome = packages::run_plan(&plan, &options, print_line)?;
+    println!("completed {} steps", outcome.completed.len());
+    if !outcome.failed_optional.is_empty() {
+        println!(
+            "optional steps failed: {}",
+            outcome.failed_optional.join(", ")
+        );
+    }
+
+    let checks = deps::check_all();
+    let missing = deps::missing(&checks);
+    if missing.is_empty() {
+        println!("all required dependencies are present");
+        Ok(())
+    } else {
+        bail!(
+            "still missing: {}",
+            missing
+                .iter()
+                .map(|dep| dep.command)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 }

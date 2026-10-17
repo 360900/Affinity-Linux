@@ -93,6 +93,18 @@ const SPECS: &[Spec] = &[
         args: &["--version"],
         required: true,
     },
+    Spec {
+        name: "sudo",
+        command: "sudo",
+        args: &["--version"],
+        required: false,
+    },
+    Spec {
+        name: "pkexec",
+        command: "pkexec",
+        args: &["--version"],
+        required: false,
+    },
 ];
 
 pub fn check_all() -> Vec<DepCheck> {
@@ -112,13 +124,14 @@ fn check(spec: &Spec) -> DepCheck {
                 .map(str::trim)
                 .find(|line| !line.is_empty())
                 .map(|line| line.chars().take(100).collect::<String>());
+            // dotnet present but no SDK installed (runtime only) is not enough.
+            let has_sdk = spec.command != "dotnet" || version.is_some();
             let version = match version {
                 Some(version) => Some(version),
-                // dotnet present but no SDK installed (runtime only).
                 None if spec.command == "dotnet" => Some("no SDK found".to_string()),
                 None => None,
             };
-            (true, version)
+            (has_sdk, version)
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => (false, None),
         Err(err) => (true, Some(format!("error: {err}"))),
@@ -134,6 +147,28 @@ fn check(spec: &Spec) -> DepCheck {
 
 pub fn missing(checks: &[DepCheck]) -> Vec<&DepCheck> {
     checks.iter().filter(|c| c.required && !c.found).collect()
+}
+
+/// Vulkan ICD manifests discovered in the common system directories.
+pub fn vulkan_icds() -> Vec<String> {
+    const DIRS: [&str; 2] = ["/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d"];
+    let mut found = Vec::new();
+    for dir in DIRS {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "json")
+                && let Some(name) = path.file_name().and_then(|name| name.to_str())
+            {
+                found.push(name.to_string());
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
 }
 
 /// Locate a command on PATH without executing it.

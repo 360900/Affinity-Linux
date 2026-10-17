@@ -6,6 +6,7 @@ pub mod distro;
 pub mod doctor;
 pub mod gpu;
 pub mod manifest;
+pub mod packages;
 pub mod runner;
 
 use std::path::{Path, PathBuf};

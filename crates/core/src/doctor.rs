@@ -8,6 +8,7 @@ use crate::deps::{self, DepCheck};
 use crate::distro::{Family, OsRelease};
 use crate::gpu::{self, Gpu};
 use crate::manifest::Manifest;
+use crate::packages;
 use crate::{WINE_DIR_NAME, app_exe};
 
 #[derive(Debug, Clone, Serialize)]
@@ -16,7 +17,9 @@ pub struct DoctorReport {
     pub family: Family,
     pub package_manager: Option<String>,
     pub gpus: Vec<Gpu>,
+    pub vulkan_icds: Vec<String>,
     pub deps: Vec<DepCheck>,
+    pub package_notes: Vec<String>,
     pub config_path: PathBuf,
     pub prefix: PathBuf,
     pub prefix_exists: bool,
@@ -70,6 +73,8 @@ pub fn run(cfg: &Config) -> DoctorReport {
                 .then(|| WINE_DIR_NAME.to_string())
         });
 
+    let package_notes = packages::plan(&os).notes;
+
     let installed = app_exe(&prefix).is_file()
         || manifest
             .as_ref()
@@ -81,7 +86,9 @@ pub fn run(cfg: &Config) -> DoctorReport {
         family,
         package_manager,
         gpus: gpu::detect(),
+        vulkan_icds: deps::vulkan_icds(),
         deps: deps::check_all(),
+        package_notes,
         config_path: config_path(),
         prefix,
         prefix_exists,
