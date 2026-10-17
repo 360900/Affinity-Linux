@@ -1,4 +1,4 @@
-import { Button, ListView } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, ListView } from "std-widgets.slint";
 
 export struct LogLine {
     text: string,
@@ -41,6 +41,8 @@ export component MainWindow inherits Window {
     in-out property <[LogLine]> logs: [];
     in property <bool> installed: false;
     in property <bool> busy: false;
+    in-out property <int> backend-index: 0;
+    in-out property <bool> opencl-enabled: false;
 
     callback install-clicked();
     callback launch-clicked();
@@ -89,6 +91,26 @@ export component MainWindow inherits Window {
                 InfoRow { title: "Wine build"; value: root.wine-text; }
                 InfoRow { title: "Dependencies"; value: root.deps-text; }
                 InfoRow { title: "Prefix"; value: root.prefix-text; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: "GPU backend";
+                        width: 88px;
+                        color: #8b929c;
+                        font-size: 12px;
+                    }
+                    ComboBox {
+                        model: ["vkd3d (OpenCL)", "DXVK"];
+                        current-index: root.backend-index;
+                        selected(value) => { root.backend-index = value == "DXVK" ? 1 : 0; }
+                    }
+                    CheckBox {
+                        text: "OpenCL";
+                        checked: root.opencl-enabled;
+                        toggled => { root.opencl-enabled = self.checked; }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
             }
         }
 

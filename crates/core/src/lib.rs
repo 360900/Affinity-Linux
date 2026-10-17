@@ -1,5 +1,6 @@
 //! Headless engine for the Affinity v3 Linux installer.
 
+pub mod backends;
 pub mod config;
 pub mod deps;
 pub mod desktop;
@@ -11,10 +12,12 @@ pub mod http;
 pub mod install;
 pub mod installer;
 mod journal;
+pub mod launch;
 pub mod manifest;
 pub mod packages;
 pub mod patch;
 pub mod runner;
+pub mod uninstall;
 pub mod wine;
 
 use std::path::{Path, PathBuf};

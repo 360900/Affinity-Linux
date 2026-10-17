@@ -5,16 +5,21 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
-use affinity_linux_core::config::Config;
+use affinity_linux_core::backends;
+use affinity_linux_core::config::{Config, GpuBackend, default_prefix};
 use affinity_linux_core::deps;
 use affinity_linux_core::distro::OsRelease;
 use affinity_linux_core::doctor::{self, DoctorReport};
+use affinity_linux_core::gpu::{self, Vendor};
 use affinity_linux_core::install;
+use affinity_linux_core::launch;
 use affinity_linux_core::manifest::{
-    Manifest, STEP_DEPS, STEP_PREFIX, STEP_WINE, STEP_WINETRICKS, StepStatus, now_epoch,
+    Manifest, STEP_BACKENDS, STEP_DEPS, STEP_PREFIX, STEP_WINE, STEP_WINETRICKS, StepStatus,
+    now_epoch,
 };
 use affinity_linux_core::packages::{self, Elevation, PlanRunOptions};
 use affinity_linux_core::runner::Stream;
+use affinity_linux_core::uninstall;
 use affinity_linux_core::wine;
 
 #[derive(Parser)]
@@ -83,9 +88,18 @@ enum Command {
         /// Skip the Wine bootstrap step (use the existing prefix)
         #[arg(long)]
         skip_wine: bool,
+        /// GPU backend override: vkd3d or dxvk
+        #[arg(long, value_parser = ["vkd3d", "dxvk"])]
+        gpu: Option<String>,
+        /// Enable OpenCL: true or false
+        #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
+        opencl: Option<bool>,
     },
     /// Launch Affinity with the correct Wine environment
     Launch {
+        /// Print the environment without starting Affinity
+        #[arg(long)]
+        dry_run: bool,
         /// Extra arguments forwarded to the Affinity executable
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -95,6 +109,9 @@ enum Command {
         /// Do not ask for confirmation
         #[arg(long)]
         yes: bool,
+        /// Print what would be removed without deleting anything
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -130,13 +147,13 @@ fn main() -> Result<()> {
             installer,
             skip_deps,
             skip_wine,
-        } => run_install(&cfg, dry_run, yes, prefix, installer, skip_deps, skip_wine),
-        Command::Launch { args: _ } => {
-            anyhow::bail!("launch is not implemented yet (M5); the prefix is untouched")
-        }
-        Command::Uninstall { yes: _ } => {
-            anyhow::bail!("uninstall is not implemented yet (M5); nothing was removed")
-        }
+            gpu,
+            opencl,
+        } => run_install(
+            &cfg, dry_run, yes, prefix, installer, skip_deps, skip_wine, gpu, opencl,
+        ),
+        Command::Launch { dry_run, args } => run_launch(&cfg, dry_run, args),
+        Command::Uninstall { yes, dry_run } => run_uninstall(&cfg, yes, dry_run),
     }
 }
 
@@ -320,6 +337,7 @@ fn yes_no(value: bool) -> &'static str {
     if value { "ok" } else { "skipped" }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_install(
     cfg: &Config,
     dry_run: bool,
@@ -328,9 +346,19 @@ fn run_install(
     installer: Option<PathBuf>,
     skip_deps: bool,
     skip_wine: bool,
+    gpu: Option<String>,
+    opencl: Option<bool>,
 ) -> Result<()> {
     let os = OsRelease::detect()?;
     let prefix = prefix.unwrap_or_else(|| cfg.prefix.clone());
+    let backend = match gpu.as_deref() {
+        Some("vkd3d") => GpuBackend::Vkd3d,
+        Some("dxvk") => GpuBackend::Dxvk,
+        Some(other) => bail!("unknown GPU backend '{other}'"),
+        None => cfg.gpu_backend,
+    };
+    let opencl = opencl.unwrap_or(cfg.opencl);
+    let amd = gpu::detect().iter().any(|gpu| gpu.vendor == Vendor::Amd);
 
     println!("install Affinity v3");
     println!("  distro    {} ({})", os.name(), os.family().label());
@@ -358,6 +386,14 @@ fn run_install(
             "bootstrap 11.19 (fallback 11.18)"
         }
     );
+    println!(
+        "  backend   {}{}",
+        match backend {
+            GpuBackend::Vkd3d => "vkd3d",
+            GpuBackend::Dxvk => "dxvk",
+        },
+        if opencl { " (OpenCL)" } else { "" }
+    );
     println!();
 
     if dry_run {
@@ -380,6 +416,23 @@ fn run_install(
             };
             wine::setup(&options, print_stream)?;
         }
+        if opencl && amd {
+            let plan = packages::amd_opencl_plan(&os);
+            let options = PlanRunOptions {
+                dry_run: true,
+                elevation: packages::default_elevation(),
+                log_path: None,
+            };
+            packages::run_plan(&plan, &options, print_stream)?;
+        }
+        let backend_options = backends::BackendOptions {
+            prefix: prefix.clone(),
+            backend,
+            opencl,
+            dry_run: true,
+            log_path: None,
+        };
+        backends::install(&backend_options, print_stream)?;
         let options = install::InstallOptions {
             prefix,
             installer,
@@ -433,6 +486,32 @@ fn run_install(
         }
     }
 
+    if !skip_deps && opencl && amd {
+        let plan = packages::amd_opencl_plan(&os);
+        for note in &plan.notes {
+            println!("note: {note}");
+        }
+        if !plan.steps.is_empty() {
+            let elevation = packages::default_elevation();
+            if elevation == Elevation::Sudo && deps::which("sudo").is_none() {
+                println!("warning: sudo is missing; skipping AMD OpenCL packages");
+            } else {
+                let options = PlanRunOptions {
+                    dry_run: false,
+                    elevation,
+                    log_path: Some(log_path.clone()),
+                };
+                let outcome = packages::run_plan(&plan, &options, print_stream)?;
+                if !outcome.failed_optional.is_empty() {
+                    println!(
+                        "warning: optional OpenCL steps failed: {}",
+                        outcome.failed_optional.join(", ")
+                    );
+                }
+            }
+        }
+    }
+
     if !skip_wine {
         let options = wine::SetupOptions {
             prefix: prefix.clone(),
@@ -465,6 +544,29 @@ fn run_install(
         );
     }
 
+    let backend_options = backends::BackendOptions {
+        prefix: prefix.clone(),
+        backend,
+        opencl,
+        dry_run: false,
+        log_path: Some(log_path.clone()),
+    };
+    match backends::install(&backend_options, print_stream) {
+        Ok(result) => {
+            if let Some(version) = &result.vkd3d_version {
+                println!("vkd3d    {version}");
+            }
+            if let Some(version) = &result.dxvk_version {
+                println!("dxvk     {version}");
+            }
+            mark_step(&prefix, STEP_BACKENDS, StepStatus::Done);
+        }
+        Err(error) => {
+            println!("warning: GPU backend setup failed: {error}");
+            mark_step(&prefix, STEP_BACKENDS, StepStatus::Failed);
+        }
+    }
+
     let options = install::InstallOptions {
         prefix: prefix.clone(),
         installer,
@@ -492,8 +594,79 @@ fn run_install(
 
     let mut saved = cfg.clone();
     saved.prefix = prefix;
+    saved.gpu_backend = backend;
+    saved.opencl = opencl;
     saved.save()?;
-    println!("saved install location in the config");
+    println!("saved install location and GPU settings in the config");
+    Ok(())
+}
+
+fn run_launch(cfg: &Config, dry_run: bool, args: Vec<String>) -> Result<()> {
+    let prefix = cfg.prefix.clone();
+    let log_path = if dry_run {
+        None
+    } else {
+        let log_dir = prefix.join("logs");
+        fs::create_dir_all(&log_dir)?;
+        Some(log_dir.join(format!("launch-{}.log", now_epoch())))
+    };
+    let options = launch::LaunchOptions {
+        prefix,
+        args,
+        dry_run,
+        log_path,
+    };
+    let outcome = launch::launch(&options, print_stream)?;
+    println!("target  {}", outcome.target.display());
+    if let Some(backup) = outcome.quarantined {
+        println!("quarantined  {}", backup.display());
+    }
+    Ok(())
+}
+
+fn run_uninstall(cfg: &Config, yes: bool, dry_run: bool) -> Result<()> {
+    let prefix = cfg.prefix.clone();
+    if !dry_run
+        && !yes
+        && !confirm(&format!(
+            "Remove {} and its desktop entries?",
+            prefix.display()
+        ))?
+    {
+        println!("aborted");
+        return Ok(());
+    }
+    let log_path = if dry_run {
+        None
+    } else if prefix.exists() {
+        let log_dir = prefix.join("logs");
+        fs::create_dir_all(&log_dir)?;
+        Some(log_dir.join(format!("uninstall-{}.log", now_epoch())))
+    } else {
+        None
+    };
+    let options = uninstall::UninstallOptions {
+        prefix: prefix.clone(),
+        dry_run,
+        log_path,
+    };
+    let outcome = uninstall::uninstall(&options, print_stream)?;
+    if dry_run {
+        return Ok(());
+    }
+    let mut saved = cfg.clone();
+    saved.prefix = default_prefix();
+    saved.save()?;
+    println!(
+        "removed {} desktop entr{}, prefix removed={}",
+        outcome.removed_entries,
+        if outcome.removed_entries == 1 {
+            "y"
+        } else {
+            "ies"
+        },
+        outcome.prefix_removed
+    );
     Ok(())
 }
 

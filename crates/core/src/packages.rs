@@ -290,6 +290,60 @@ fn suse_plan() -> (String, Vec<PackageStep>) {
     )
 }
 
+/// Optional OpenCL packages for AMD GPUs. Upstream only automates Fedora,
+/// Arch-family and PikaOS; everything else gets a note.
+pub fn amd_opencl_plan(os: &OsRelease) -> PackagePlan {
+    let family = os.family();
+    let id = os.id.to_ascii_lowercase();
+    let (major, _) = version_tuple(os);
+    let mut steps = Vec::new();
+    let mut notes = Vec::new();
+
+    match family {
+        Family::Arch => steps.push(PackageStep::root_optional(
+            "Install AMD OpenCL packages",
+            "pacman -S --needed --noconfirm opencl-mesa ocl-icd rocm-opencl-runtime rocm-hip wine-opencl",
+        )),
+        Family::Fedora => {
+            if id == "fedora" && major >= 43 {
+                steps.push(PackageStep::root_optional(
+                    "Install AMD OpenCL packages",
+                    "dnf install -y mesa-opencl-icd ocl-icd rocm-opencl rocm-hip wine-opencl",
+                ));
+            } else {
+                steps.push(PackageStep::root_optional(
+                    "Install AMD OpenCL packages",
+                    "dnf install -y rocm-opencl apr apr-util zlib libxcrypt-compat libcurl libcurl-devel mesa-libGLU",
+                ));
+            }
+        }
+        Family::Ubuntu | Family::Debian => {
+            if id == "pika" || id == "pikaos" {
+                steps.push(PackageStep::root_optional(
+                    "Install AMD OpenCL packages",
+                    "apt-get install -y mesa-opencl-icd ocl-icd-libopencl1 rocm-opencl-runtime rocm-hip-runtime",
+                ));
+            } else {
+                notes.push(
+                    "AMD OpenCL packages are not automated for this distribution; install mesa-opencl-icd and rocm-opencl manually."
+                        .to_string(),
+                );
+            }
+        }
+        _ => notes.push(
+            "AMD OpenCL packages are not automated for this distribution; install the Mesa/ROCm OpenCL ICDs manually."
+                .to_string(),
+        ),
+    }
+
+    PackagePlan {
+        family,
+        flavor: "amd-opencl".to_string(),
+        steps,
+        notes,
+    }
+}
+
 fn version_tuple(os: &OsRelease) -> (u32, u32) {
     let Some(version) = os.version_id.as_deref() else {
         return (0, 0);
