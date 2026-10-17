@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
+use affinity_linux_core::app_exe;
 use affinity_linux_core::backends;
 use affinity_linux_core::config::{Config, GpuBackend, default_prefix};
 use affinity_linux_core::deps;
@@ -36,12 +37,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Show distro, GPU, dependency and prefix status
+    #[command(hide = true)]
     Doctor {
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
     },
     /// Check and install system packages needed by the installer
+    #[command(hide = true)]
     Deps {
         /// Print the planned commands without changing the system
         #[arg(long)]
@@ -54,6 +57,7 @@ enum Command {
         pkexec: bool,
     },
     /// Download and configure the patched Wine build
+    #[command(hide = true)]
     WineSetup {
         /// Print the planned commands without downloading anything
         #[arg(long)]
@@ -94,6 +98,33 @@ enum Command {
         /// Enable OpenCL: true or false
         #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
         opencl: Option<bool>,
+    },
+    /// Reinstall the latest Affinity build and re-apply post-install fixes
+    Update {
+        /// Print the planned commands without changing the system
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask for confirmation
+        #[arg(long)]
+        yes: bool,
+        /// Prefix override; saved to the config after a successful update
+        #[arg(long)]
+        prefix: Option<PathBuf>,
+        /// Use a local Affinity setup executable instead of downloading it
+        #[arg(long)]
+        installer: Option<PathBuf>,
+    },
+    /// Re-apply post-install fixes without reinstalling Affinity
+    Repair {
+        /// Print the planned commands without changing the system
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask for confirmation
+        #[arg(long)]
+        yes: bool,
+        /// Prefix override
+        #[arg(long)]
+        prefix: Option<PathBuf>,
     },
     /// Launch Affinity with the correct Wine environment
     Launch {
@@ -152,6 +183,17 @@ fn main() -> Result<()> {
         } => run_install(
             &cfg, dry_run, yes, prefix, installer, skip_deps, skip_wine, gpu, opencl,
         ),
+        Command::Update {
+            dry_run,
+            yes,
+            prefix,
+            installer,
+        } => run_update(&cfg, dry_run, yes, prefix, installer),
+        Command::Repair {
+            dry_run,
+            yes,
+            prefix,
+        } => run_repair(&cfg, dry_run, yes, prefix),
         Command::Launch { dry_run, args } => run_launch(&cfg, dry_run, args),
         Command::Uninstall { yes, dry_run } => run_uninstall(&cfg, yes, dry_run),
     }
@@ -574,7 +616,18 @@ fn run_install(
         log_path: Some(log_path.clone()),
     };
     let outcome = install::install(&options, print_stream)?;
+    print_outcome(&outcome);
 
+    let mut saved = cfg.clone();
+    saved.prefix = prefix;
+    saved.gpu_backend = backend;
+    saved.opencl = opencl;
+    saved.save()?;
+    println!("saved install location and GPU settings in the config");
+    Ok(())
+}
+
+fn print_outcome(outcome: &install::InstallReport) {
     if outcome.used_msi_fallback {
         println!("note: the embedded MSI fallback was used");
     }
@@ -591,13 +644,123 @@ fn run_install(
             println!("  - {failure}");
         }
     }
+}
 
-    let mut saved = cfg.clone();
-    saved.prefix = prefix;
-    saved.gpu_backend = backend;
-    saved.opencl = opencl;
-    saved.save()?;
-    println!("saved install location and GPU settings in the config");
+fn ensure_installed(prefix: &Path) -> Result<()> {
+    if !app_exe(prefix).exists() {
+        bail!(
+            "Affinity is not installed in {}; run `affinity-linux install` first",
+            prefix.display()
+        );
+    }
+    let registry = fs::read_to_string(prefix.join("system.reg")).unwrap_or_default();
+    if !wine::has_dotnet48(&registry) {
+        bail!(
+            ".NET Framework 4.8 is missing from {}; reinstall with `affinity-linux install`",
+            prefix.display()
+        );
+    }
+    Ok(())
+}
+
+fn run_update(
+    cfg: &Config,
+    dry_run: bool,
+    yes: bool,
+    prefix: Option<PathBuf>,
+    installer: Option<PathBuf>,
+) -> Result<()> {
+    let prefix = prefix.unwrap_or_else(|| cfg.prefix.clone());
+    println!("update Affinity v3");
+    println!("  prefix    {}", prefix.display());
+
+    if !dry_run {
+        ensure_installed(&prefix)?;
+        if !yes && !confirm(&format!("Update Affinity in {}?", prefix.display()))? {
+            println!("aborted");
+            return Ok(());
+        }
+    }
+
+    let log_path = if dry_run {
+        None
+    } else {
+        let log_dir = prefix.join("logs");
+        fs::create_dir_all(&log_dir)?;
+        let path = log_dir.join(format!("update-{}.log", now_epoch()));
+        println!("  log       {}", path.display());
+        Some(path)
+    };
+
+    let options = install::InstallOptions {
+        prefix: prefix.clone(),
+        installer,
+        dry_run,
+        log_path,
+    };
+    let outcome = install::install(&options, print_stream)?;
+    print_outcome(&outcome);
+
+    if !dry_run {
+        let mut saved = cfg.clone();
+        saved.prefix = prefix;
+        saved.save()?;
+    }
+    Ok(())
+}
+
+fn run_repair(cfg: &Config, dry_run: bool, yes: bool, prefix: Option<PathBuf>) -> Result<()> {
+    let prefix = prefix.unwrap_or_else(|| cfg.prefix.clone());
+    println!("repair Affinity v3");
+    println!("  prefix    {}", prefix.display());
+
+    if !dry_run {
+        ensure_installed(&prefix)?;
+        if !yes && !confirm(&format!("Repair Affinity in {}?", prefix.display()))? {
+            println!("aborted");
+            return Ok(());
+        }
+    }
+
+    let log_path = if dry_run {
+        None
+    } else {
+        let log_dir = prefix.join("logs");
+        fs::create_dir_all(&log_dir)?;
+        let path = log_dir.join(format!("repair-{}.log", now_epoch()));
+        println!("  log       {}", path.display());
+        Some(path)
+    };
+
+    let backend_options = backends::BackendOptions {
+        prefix: prefix.clone(),
+        backend: cfg.gpu_backend,
+        opencl: cfg.opencl,
+        dry_run,
+        log_path: log_path.clone(),
+    };
+    match backends::install(&backend_options, print_stream) {
+        Ok(_) => {
+            if !dry_run {
+                mark_step(&prefix, STEP_BACKENDS, StepStatus::Done);
+            }
+        }
+        Err(error) => {
+            println!("warning: GPU backend setup failed: {error}");
+            if !dry_run {
+                mark_step(&prefix, STEP_BACKENDS, StepStatus::Failed);
+            }
+        }
+    }
+
+    let options = install::InstallOptions {
+        prefix,
+        installer: None,
+        dry_run,
+        log_path,
+    };
+    let outcome = install::repair(&options, print_stream)?;
+    print_outcome(&outcome);
     Ok(())
 }
 

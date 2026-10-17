@@ -1,11 +1,12 @@
 slint::include_modules!();
 
-use std::cell::Cell;
 use std::fs;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
 
+use affinity_linux_core::app_exe;
 use affinity_linux_core::backends;
 use affinity_linux_core::config::{Config, GpuBackend, default_prefix};
 use affinity_linux_core::deps;
@@ -19,7 +20,7 @@ use affinity_linux_core::packages::{self, Elevation, PlanRunOptions};
 use affinity_linux_core::runner::Stream;
 use affinity_linux_core::uninstall;
 use affinity_linux_core::wine;
-use slint::{ComponentHandle, VecModel};
+use slint::{ComponentHandle, Model, VecModel};
 
 enum UiEvent {
     Doctor(Box<DoctorReport>),
@@ -50,13 +51,13 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let weak = ui.as_weak();
-        let logs = logs.clone();
         let cfg = cfg.clone();
         let tx = tx.clone();
         ui.on_install_clicked(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
             let backend = if ui.get_backend_index() == 1 {
                 GpuBackend::Dxvk
             } else {
@@ -64,21 +65,9 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             let opencl = ui.get_opencl_enabled();
             ui.set_busy(true);
-            ui.set_state_text("Installing Affinity v3...".into());
-            push_log(
-                &logs,
-                format!(
-                    "install: starting (backend {}, opencl {})",
-                    if backend == GpuBackend::Dxvk {
-                        "dxvk"
-                    } else {
-                        "vkd3d"
-                    },
-                    opencl
-                ),
-                false,
-            );
-            spawn_install(cfg.clone(), backend, opencl, tx.clone());
+            ui.set_state_text("Installing Affinity...".into());
+            ui.set_status_text("Starting...".into());
+            spawn_install(cfg, backend, opencl, tx.clone());
         });
     }
     {
@@ -89,71 +78,67 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
             ui.set_busy(true);
-            ui.set_state_text("Launching Affinity...".into());
-            spawn_launch(cfg.clone(), tx.clone());
+            ui.set_state_text("Opening Affinity...".into());
+            ui.set_status_text("Starting...".into());
+            spawn_launch(cfg, tx.clone());
         });
     }
     {
         let weak = ui.as_weak();
-        let logs = logs.clone();
         let cfg = cfg.clone();
         let tx = tx.clone();
-        let pending = Rc::new(Cell::new(false));
+        ui.on_update_clicked(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
+            ui.set_busy(true);
+            ui.set_state_text("Updating Affinity...".into());
+            ui.set_status_text("Starting...".into());
+            spawn_update(cfg, tx.clone());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let cfg = cfg.clone();
+        let tx = tx.clone();
+        ui.on_repair_clicked(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
+            let backend = if ui.get_backend_index() == 1 {
+                GpuBackend::Dxvk
+            } else {
+                GpuBackend::Vkd3d
+            };
+            let opencl = ui.get_opencl_enabled();
+            ui.set_busy(true);
+            ui.set_state_text("Repairing Affinity...".into());
+            ui.set_status_text("Starting...".into());
+            spawn_repair(cfg, backend, opencl, tx.clone());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let cfg = cfg.clone();
+        let tx = tx.clone();
         ui.on_uninstall_clicked(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            if !pending.get() {
-                pending.set(true);
-                ui.set_state_text("Click Uninstall again to confirm".into());
-                push_log(
-                    &logs,
-                    "uninstall: press Uninstall again to confirm".into(),
-                    true,
-                );
-                return;
-            }
-            pending.set(false);
+            let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
             ui.set_busy(true);
             ui.set_state_text("Removing Affinity...".into());
-            spawn_uninstall(cfg.clone(), tx.clone());
-        });
-    }
-    {
-        let logs_update = logs.clone();
-        ui.on_update_clicked(move || {
-            logs_update.push(LogLine {
-                text: "update: deferred to v0.2".into(),
-                error: false,
-            });
-        });
-    }
-    {
-        let logs_repair = logs.clone();
-        ui.on_repair_clicked(move || {
-            logs_repair.push(LogLine {
-                text: "repair: deferred to v0.2".into(),
-                error: false,
-            });
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let tx = tx.clone();
-        let cfg = cfg.clone();
-        ui.on_recheck_clicked(move || {
-            if let Some(ui) = weak.upgrade() {
-                ui.set_state_text("Checking system...".into());
-                ui.set_busy(true);
-            }
-            spawn_doctor(cfg.clone(), tx.clone());
+            ui.set_status_text("Starting...".into());
+            spawn_uninstall(cfg, tx.clone());
         });
     }
 
     let weak = ui.as_weak();
     let logs = logs.clone();
-    let cfg = cfg.clone();
     let tx = tx.clone();
     let timer = slint::Timer::default();
     timer.start(
@@ -166,16 +151,23 @@ fn main() -> Result<(), slint::PlatformError> {
             while let Ok(event) = rx.try_recv() {
                 match event {
                     UiEvent::Doctor(report) => apply_report(&ui, &logs, *report),
-                    UiEvent::Log(text, error) => push_log(&logs, text, error),
+                    UiEvent::Log(text, error) => {
+                        ui.set_status_text(text.clone().into());
+                        push_log(&logs, text, error);
+                    }
                     UiEvent::JobDone(kind) => {
                         ui.set_busy(false);
-                        ui.set_state_text(format!("{kind} finished").into());
+                        ui.set_state_text(job_state(kind).into());
+                        ui.set_status_text("Done".into());
                         push_log(&logs, format!("{kind}: finished"), false);
-                        spawn_doctor(cfg.clone(), tx.clone());
+                        let cfg = Config::load().unwrap_or_default();
+                        spawn_doctor(cfg, tx.clone());
                     }
                     UiEvent::JobFailed(message) => {
                         ui.set_busy(false);
-                        ui.set_state_text("Last action failed".into());
+                        ui.set_state_text("Something went wrong.".into());
+                        ui.set_status_text(message.clone().into());
+                        ui.set_details_open(true);
                         push_log(&logs, format!("error: {message}"), true);
                     }
                 }
@@ -186,7 +178,21 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.run()
 }
 
+fn job_state(kind: &str) -> &'static str {
+    match kind {
+        "install" => "Affinity is installed.",
+        "update" => "Affinity is up to date.",
+        "repair" => "Affinity has been repaired.",
+        "uninstall" => "Affinity has been removed.",
+        "launch" => "Affinity is running.",
+        _ => "Done.",
+    }
+}
+
 fn push_log(logs: &Rc<VecModel<LogLine>>, text: String, error: bool) {
+    while logs.row_count() >= 400 {
+        logs.remove(0);
+    }
     logs.push(LogLine {
         text: text.into(),
         error,
@@ -201,15 +207,12 @@ fn spawn_doctor(cfg: Config, tx: Sender<UiEvent>) {
 }
 
 fn spawn_install(cfg: Config, backend: GpuBackend, opencl: bool, tx: Sender<UiEvent>) {
-    std::thread::spawn(move || {
-        let result = install_all(&cfg, backend, opencl, &tx);
-        match result {
-            Ok(()) => {
-                let _ = tx.send(UiEvent::JobDone("install"));
-            }
-            Err(error) => {
-                let _ = tx.send(UiEvent::JobFailed(format!("{error:#}")));
-            }
+    std::thread::spawn(move || match install_all(&cfg, backend, opencl, &tx) {
+        Ok(()) => {
+            let _ = tx.send(UiEvent::JobDone("install"));
+        }
+        Err(error) => {
+            let _ = tx.send(UiEvent::JobFailed(format!("{error:#}")));
         }
     });
 }
@@ -290,10 +293,7 @@ fn install_all(
     };
     wine::setup(&setup, &mut send)?;
 
-    let registry = fs::read_to_string(prefix.join("system.reg")).unwrap_or_default();
-    if !wine::has_dotnet48(&registry) {
-        anyhow::bail!(".NET Framework 4.8 is not registered in the prefix");
-    }
+    ensure_installed(&prefix)?;
 
     let backend_options = backends::BackendOptions {
         prefix: prefix.clone(),
@@ -322,6 +322,111 @@ fn install_all(
     saved.opencl = opencl;
     saved.save()?;
     Ok(())
+}
+
+fn ensure_installed(prefix: &Path) -> anyhow::Result<()> {
+    if !app_exe(prefix).exists() {
+        anyhow::bail!(
+            "Affinity is not installed in {}; run the installer again",
+            prefix.display()
+        );
+    }
+    let registry = fs::read_to_string(prefix.join("system.reg")).unwrap_or_default();
+    if !wine::has_dotnet48(&registry) {
+        anyhow::bail!(".NET Framework 4.8 is missing from the prefix; reinstall Affinity");
+    }
+    Ok(())
+}
+
+fn spawn_update(cfg: Config, tx: Sender<UiEvent>) {
+    std::thread::spawn(move || {
+        let prefix = cfg.prefix.clone();
+        let result = (|| -> anyhow::Result<()> {
+            ensure_installed(&prefix)?;
+            let log_path = prefix
+                .join("logs")
+                .join(format!("update-{}.log", now_epoch()));
+            if let Some(parent) = log_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut send = |stream: Stream, line: &str| {
+                let _ = tx.send(UiEvent::Log(
+                    line.to_string(),
+                    matches!(stream, Stream::Stderr),
+                ));
+            };
+            let options = install::InstallOptions {
+                prefix,
+                installer: None,
+                dry_run: false,
+                log_path: Some(log_path),
+            };
+            install::install(&options, &mut send)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                let _ = tx.send(UiEvent::JobDone("update"));
+            }
+            Err(error) => {
+                let _ = tx.send(UiEvent::JobFailed(format!("{error:#}")));
+            }
+        }
+    });
+}
+
+fn spawn_repair(cfg: Config, backend: GpuBackend, opencl: bool, tx: Sender<UiEvent>) {
+    std::thread::spawn(move || {
+        let prefix = cfg.prefix.clone();
+        let result = (|| -> anyhow::Result<()> {
+            ensure_installed(&prefix)?;
+            let log_path = prefix
+                .join("logs")
+                .join(format!("repair-{}.log", now_epoch()));
+            if let Some(parent) = log_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut send = |stream: Stream, line: &str| {
+                let _ = tx.send(UiEvent::Log(
+                    line.to_string(),
+                    matches!(stream, Stream::Stderr),
+                ));
+            };
+            let backend_options = backends::BackendOptions {
+                prefix: prefix.clone(),
+                backend,
+                opencl,
+                dry_run: false,
+                log_path: Some(log_path.clone()),
+            };
+            if let Err(error) = backends::install(&backend_options, &mut send) {
+                let _ = tx.send(UiEvent::Log(
+                    format!("warning: GPU backend setup failed: {error:#}"),
+                    true,
+                ));
+            }
+            let options = install::InstallOptions {
+                prefix,
+                installer: None,
+                dry_run: false,
+                log_path: Some(log_path),
+            };
+            install::repair(&options, &mut send)?;
+            let mut saved = cfg.clone();
+            saved.gpu_backend = backend;
+            saved.opencl = opencl;
+            saved.save()?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                let _ = tx.send(UiEvent::JobDone("repair"));
+            }
+            Err(error) => {
+                let _ = tx.send(UiEvent::JobFailed(format!("{error:#}")));
+            }
+        }
+    });
 }
 
 fn spawn_launch(cfg: Config, tx: Sender<UiEvent>) {
@@ -423,45 +528,41 @@ fn apply_report(ui: &MainWindow, logs: &Rc<VecModel<LogLine>>, report: DoctorRep
         .map(|dep| dep.command)
         .collect();
     let deps = if missing.is_empty() {
-        format!("{found}/{} found, all required present", report.deps.len())
+        "all required dependencies present".to_string()
     } else {
-        format!(
-            "{found}/{} found, missing: {}",
-            report.deps.len(),
-            missing.join(", ")
-        )
+        format!("missing: {}", missing.join(", "))
     };
     let wine = report
         .wine_build
         .clone()
         .unwrap_or_else(|| "not installed".into());
-    let prefix = format!(
-        "{} (exists: {}, installed: {})",
-        report.prefix.display(),
-        report.prefix_exists,
-        report.installed
-    );
 
     ui.set_distro_text(distro.clone().into());
     ui.set_gpu_text(gpu.clone().into());
     ui.set_deps_text(deps.clone().into());
     ui.set_wine_text(wine.clone().into());
-    ui.set_prefix_text(prefix.clone().into());
+    ui.set_prefix_text(report.prefix.display().to_string().into());
     ui.set_installed(report.installed);
-    ui.set_busy(false);
 
     let state = if report.installed {
-        "Installed. Use Launch Affinity to start it."
+        "Affinity is ready to use."
     } else {
-        "Not installed. Install Affinity runs dependencies, Wine, GPU and the app."
+        "Install Affinity to get started."
     };
     ui.set_state_text(state.into());
+    if !ui.get_busy() {
+        ui.set_status_text("System ready".into());
+    }
 
-    push_log(logs, format!("distro: {distro}"), false);
+    let missing_required = !missing.is_empty();
+    push_log(logs, format!("system: {distro}"), false);
     push_log(logs, format!("gpu: {gpu}"), false);
     push_log(logs, format!("wine: {wine}"), false);
-    push_log(logs, format!("deps: {deps}"), !missing.is_empty());
-    push_log(logs, format!("prefix: {prefix}"), false);
+    push_log(
+        logs,
+        format!("deps: {found}/{} found, {deps}", report.deps.len()),
+        missing_required,
+    );
     for error in &report.errors {
         push_log(logs, format!("error: {error}"), true);
     }

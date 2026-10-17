@@ -54,13 +54,38 @@ where
     outcome.used_msi_fallback = setup.used_msi_fallback;
     mark(opts, STEP_INSTALLER, StepStatus::Done, None);
 
+    run_extras(opts, &mut report, &mut outcome)?;
+    finish(opts, &mut report, &outcome);
+    Ok(outcome)
+}
+
+/// Re-apply post-install fixes without running the Affinity installer again.
+pub fn repair<F>(opts: &InstallOptions, on_line: F) -> Result<InstallReport>
+where
+    F: FnMut(Stream, &str),
+{
+    let mut sink = on_line;
+    let mut report = Report::new(opts.log_path.clone(), &mut sink);
+    let mut outcome = InstallReport::default();
+
+    report.info("Affinity v3 repair");
+    run_extras(opts, &mut report, &mut outcome)?;
+    finish(opts, &mut report, &outcome);
+    Ok(outcome)
+}
+
+fn run_extras(
+    opts: &InstallOptions,
+    report: &mut Report<'_>,
+    outcome: &mut InstallReport,
+) -> Result<()> {
     let facades = extras::install_facades(
         &opts.prefix,
         opts.dry_run,
         opts.log_path.clone(),
         |stream, line| report.line(stream, line),
     );
-    outcome.facades = record(&mut report, &mut outcome, STEP_FACADES, facades, opts);
+    outcome.facades = record(report, outcome, STEP_FACADES, facades, opts);
 
     if opts.dry_run || app_exe(&opts.prefix).exists() {
         let patched = patch::apply(
@@ -98,7 +123,7 @@ where
         opts.log_path.clone(),
         |stream, line| report.line(stream, line),
     );
-    outcome.pluginloader = record(&mut report, &mut outcome, STEP_PLUGINLOADER, loader, opts);
+    outcome.pluginloader = record(report, outcome, STEP_PLUGINLOADER, loader, opts);
 
     let desktop = desktop::create(
         &desktop::DesktopOptions {
@@ -131,7 +156,7 @@ where
         opts.log_path.clone(),
         |stream, line| report.line(stream, line),
     );
-    outcome.settings = record(&mut report, &mut outcome, STEP_SETTINGS, settings, opts);
+    outcome.settings = record(report, outcome, STEP_SETTINGS, settings, opts);
 
     let webview2 = extras::install_webview2(
         &opts.prefix,
@@ -139,22 +164,25 @@ where
         opts.log_path.clone(),
         |stream, line| report.line(stream, line),
     );
-    outcome.webview2 = record(&mut report, &mut outcome, STEP_WEBVIEW2, webview2, opts);
+    outcome.webview2 = record(report, outcome, STEP_WEBVIEW2, webview2, opts);
 
-    if !opts.dry_run {
-        if let Ok(mut manifest) = Manifest::load_or_new(&opts.prefix) {
-            manifest.affinity_exe = app_exe(&opts.prefix)
-                .exists()
-                .then(|| app_exe(&opts.prefix).display().to_string());
-            let _ = manifest.save(&opts.prefix);
-        }
-        report.info(format!(
-            "installation finished with {} failure(s)",
-            outcome.failures.len()
-        ));
+    Ok(())
+}
+
+fn finish(opts: &InstallOptions, report: &mut Report<'_>, outcome: &InstallReport) {
+    if opts.dry_run {
+        return;
     }
-
-    Ok(outcome)
+    if let Ok(mut manifest) = Manifest::load_or_new(&opts.prefix) {
+        manifest.affinity_exe = app_exe(&opts.prefix)
+            .exists()
+            .then(|| app_exe(&opts.prefix).display().to_string());
+        let _ = manifest.save(&opts.prefix);
+    }
+    report.info(format!(
+        "finished with {} failure(s)",
+        outcome.failures.len()
+    ));
 }
 
 fn record(
@@ -217,5 +245,23 @@ mod tests {
         assert!(text.contains("desktop entry"));
         assert!(report.failures.is_empty());
         assert!(!dir.path().join("Installer").exists());
+    }
+
+    #[test]
+    fn repair_dry_run_skips_the_installer() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = InstallOptions {
+            prefix: dir.path().to_path_buf(),
+            installer: None,
+            dry_run: true,
+            log_path: None,
+        };
+        let mut lines = Vec::new();
+        repair(&options, |_, line| lines.push(line.to_string())).unwrap();
+        let text = lines.join("\n");
+        assert!(text.contains("repair"));
+        assert!(text.contains("WinRT facades"));
+        assert!(text.contains("desktop entry"));
+        assert!(!text.contains("Affinity-x64.exe"));
     }
 }
