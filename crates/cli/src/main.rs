@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -11,6 +12,7 @@ use affinity_linux_core::doctor::{self, DoctorReport};
 use affinity_linux_core::manifest::now_epoch;
 use affinity_linux_core::packages::{self, Elevation, PlanRunOptions};
 use affinity_linux_core::runner::Stream;
+use affinity_linux_core::wine;
 
 #[derive(Parser)]
 #[command(
@@ -42,6 +44,21 @@ enum Command {
         /// Elevate with pkexec instead of sudo
         #[arg(long)]
         pkexec: bool,
+    },
+    /// Download and configure the patched Wine build
+    WineSetup {
+        /// Print the planned commands without downloading anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask for confirmation
+        #[arg(long)]
+        yes: bool,
+        /// Wine build to install (11.19 or 11.18)
+        #[arg(long)]
+        version: Option<String>,
+        /// Prefix override; does not change the saved config
+        #[arg(long)]
+        prefix: Option<PathBuf>,
     },
     /// Install Affinity v3 into the configured prefix
     Install {
@@ -82,9 +99,15 @@ fn main() -> Result<()> {
             yes,
             pkexec,
         } => run_deps(&cfg, dry_run, yes, pkexec),
+        Command::WineSetup {
+            dry_run,
+            yes,
+            version,
+            prefix,
+        } => run_wine_setup(&cfg, dry_run, yes, version, prefix),
         Command::Install { dry_run: _ } => {
             anyhow::bail!(
-                "install is not implemented yet (M2-M4); run `affinity-linux doctor` for the system check"
+                "install is not implemented yet (M4); run `affinity-linux doctor` for the system check"
             )
         }
         Command::Launch { args: _ } => {
@@ -164,6 +187,100 @@ fn print_report(report: &DoctorReport) {
     }
 }
 
+fn confirm(prompt: &str) -> Result<bool> {
+    print!("{prompt} [y/N] ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+fn run_wine_setup(
+    cfg: &Config,
+    dry_run: bool,
+    yes: bool,
+    version: Option<String>,
+    prefix: Option<PathBuf>,
+) -> Result<()> {
+    if let Some(version) = &version
+        && version != wine::WINE_VERSION
+        && version != wine::WINE_FALLBACK_VERSION
+    {
+        bail!(
+            "unsupported Wine version '{version}' (expected {} or {})",
+            wine::WINE_VERSION,
+            wine::WINE_FALLBACK_VERSION
+        );
+    }
+
+    let os = OsRelease::detect()?;
+    let prefix = prefix.unwrap_or_else(|| cfg.prefix.clone());
+
+    println!(
+        "wine setup for {} ({}, prefix {})",
+        os.name(),
+        os.family().label(),
+        prefix.display()
+    );
+    println!(
+        "  profile {}",
+        version
+            .as_deref()
+            .map(|version| format!("Wine {version}"))
+            .unwrap_or_else(|| format!(
+                "Wine {} (fallback {})",
+                wine::WINE_VERSION,
+                wine::WINE_FALLBACK_VERSION
+            ))
+    );
+
+    if !dry_run && !yes && !confirm("Download and configure the patched Wine build?")? {
+        println!("aborted");
+        return Ok(());
+    }
+
+    let log_path = if dry_run {
+        None
+    } else {
+        let log_dir = prefix.join("logs");
+        fs::create_dir_all(&log_dir)?;
+        let path = log_dir.join(format!("wine-{}.log", now_epoch()));
+        println!("  log     {}", path.display());
+        Some(path)
+    };
+
+    let options = wine::SetupOptions {
+        prefix: prefix.clone(),
+        family: os.family(),
+        dry_run,
+        log_path,
+        wine_version: version,
+    };
+
+    let report = wine::setup(&options, |stream, line| match stream {
+        Stream::Stdout => println!("{line}"),
+        Stream::Stderr => eprintln!("{line}"),
+    })?;
+
+    if let Some(version) = &report.wine_version {
+        println!("wine    {version}");
+    }
+    if let Some(backup) = &report.backup {
+        println!("backup  {}", backup.display());
+    }
+    if !report.failed_components.is_empty() {
+        println!(
+            "warning: components failed: {}",
+            report.failed_components.join(", ")
+        );
+    }
+
+    Ok(())
+}
+
 fn run_deps(cfg: &Config, dry_run: bool, yes: bool, pkexec: bool) -> Result<()> {
     let os = OsRelease::detect()?;
     let plan = packages::plan(&os);
@@ -211,15 +328,9 @@ fn run_deps(cfg: &Config, dry_run: bool, yes: bool, pkexec: bool) -> Result<()> 
         return Ok(());
     }
 
-    if !yes {
-        print!("Proceed? [y/N] ");
-        io::stdout().flush()?;
-        let mut answer = String::new();
-        io::stdin().read_line(&mut answer)?;
-        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-            println!("aborted");
-            return Ok(());
-        }
+    if !yes && !confirm("Proceed?")? {
+        println!("aborted");
+        return Ok(());
     }
 
     let elevation = if pkexec {

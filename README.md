@@ -9,7 +9,7 @@ Rust with a Slint interface. Clean-room implementation of the Wine pipeline.
 | --- | --- | --- |
 | M1 | Workspace, config, manifest, runner, distro/GPU/dependency check, GUI shell | done |
 | M2 | Dependency installation for Arch, Ubuntu-family, Fedora, openSUSE | done |
-| M3 | Wine bootstrap, winetricks, dotnet48 verification | pending |
+| M3 | Wine bootstrap, winetricks, dotnet48 verification | done |
 | M4 | Affinity installer, MSI fallback, patches, PluginLoader, facades, WebView2 | pending |
 | M5 | Launch environment, corruption guard, uninstall, full GUI wiring | pending |
 
@@ -26,6 +26,8 @@ cargo run -p affinity-linux -- doctor
 cargo run -p affinity-linux -- doctor --json
 cargo run -p affinity-linux -- deps --dry-run
 cargo run -p affinity-linux -- deps
+cargo run -p affinity-linux -- wine-setup --dry-run
+cargo run -p affinity-linux -- wine-setup
 cargo run -p affinity-linux-gui
 ```
 

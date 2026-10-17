@@ -8,6 +8,7 @@ pub mod gpu;
 pub mod manifest;
 pub mod packages;
 pub mod runner;
+pub mod wine;
 
 use std::path::{Path, PathBuf};
 
