@@ -1,457 +1,679 @@
-import { CheckBox, ComboBox, ListView } from "std-widgets.slint";
+import { Button, ComboBox, Palette, ProgressIndicator, ScrollView, Switch } from "std-widgets.slint";
 
 export struct LogLine {
     text: string,
     error: bool,
 }
 
-component Pill inherits Rectangle {
-    in property <string> label;
-    in property <color> dot-color: #8a86a0;
-    width: 108px;
-    height: 30px;
-    border-radius: 15px;
-    background: #ffffffcc;
+// Fluent (WinUI) surface and text tokens. Light and dark follow the system scheme.
+global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    out property <color> window-bg: dark ? #202020 : #f3f3f3;
+    out property <color> card-bg: dark ? #2b2b2b : #fbfbfb;
+    out property <color> stroke: dark ? #1d1d1d : #e5e5e5;
+    out property <color> divider: dark ? #ffffff14 : #0000000f;
+    out property <color> text-primary: Palette.foreground;
+    out property <color> text-secondary: dark ? #ffffffc9 : #0000009e;
+    out property <color> text-tertiary: dark ? #ffffff8a : #00000072;
+    out property <color> subtle-hover: dark ? #ffffff0f : #00000009;
+    out property <color> subtle-pressed: dark ? #ffffff0a : #00000006;
+    out property <color> success: dark ? #6ccb5f : #0f7b0f;
+    out property <color> caution: dark ? #fce100 : #9d5d00;
+    out property <color> critical: dark ? #ff99a4 : #c42b1c;
+    out property <color> critical-bg: dark ? #442726 : #fde7e9;
+    out property <color> scrim: dark ? #00000080 : #0000004d;
+    out property <color> dialog-bg: dark ? #2b2b2b : #ffffff;
+    out property <color> dialog-footer: dark ? #202020 : #f3f3f3;
+    out property <color> log-bg: dark ? #1c1c1c : #ffffff;
+}
+
+component Card inherits Rectangle {
+    background: Theme.card-bg;
     border-width: 1px;
-    border-color: #e8e5f2;
+    border-color: Theme.stroke;
+    border-radius: 6px;
+    vertical-stretch: 0;
+}
+
+component Section inherits VerticalLayout {
+    in property <string> title;
+    spacing: 8px;
+    vertical-stretch: 0;
+
+    Text {
+        text: root.title;
+        color: Theme.text-primary;
+        font-weight: 600;
+        vertical-stretch: 0;
+    }
+
+    @children
+}
+
+component InfoLabel inherits Text {
+    color: Theme.text-secondary;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+}
+
+component InfoValue inherits Text {
+    color: Theme.text-primary;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    overflow: elide;
+}
+
+component OptionRow inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    vertical-stretch: 0;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 12px;
+        padding-bottom: 12px;
+        spacing: 16px;
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+
+            Text {
+                text: root.title;
+                color: Theme.text-primary;
+            }
+
+            Text {
+                text: root.description;
+                color: Theme.text-secondary;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+            @children
+        }
+    }
+}
+
+component Divider inherits Rectangle {
+    height: 1px;
+    vertical-stretch: 0;
+    background: Theme.divider;
+}
+
+component Chevron inherits Path {
+    in property <bool> up;
+    width: 10px;
+    height: 10px;
+    viewbox-width: 10;
+    viewbox-height: 10;
+    commands: root.up ? "M 1.5 6.5 L 5 3 L 8.5 6.5" : "M 1.5 3.5 L 5 7 L 8.5 3.5";
+    stroke-width: 1.25px;
+}
+
+component LogToggle inherits Rectangle {
+    in property <bool> expanded;
+    callback clicked();
+
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    min-height: 32px;
+    border-radius: 4px;
+    background: touch.pressed ? Theme.subtle-pressed : touch.has-hover ? Theme.subtle-hover : transparent;
+    accessible-role: button;
+    accessible-label: label.text;
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+
+        label := Text {
+            text: root.expanded ? "Hide log" : "Show log";
+            color: Theme.text-secondary;
+            vertical-alignment: center;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            Chevron {
+                up: root.expanded;
+                stroke: Theme.text-secondary;
+            }
+        }
+    }
+}
+
+component DangerButton inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+
+    min-width: 96px;
+    min-height: 32px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    border-radius: 4px;
+    background: touch.pressed ? #a52317 : touch.has-hover ? #b1271a : #c42b1c;
+    accessible-role: button;
+    accessible-label: root.text;
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
 
     HorizontalLayout {
         padding-left: 12px;
         padding-right: 12px;
-        spacing: 7px;
-        alignment: center;
-        Rectangle {
-            width: 7px;
-            height: 7px;
-            border-radius: 4px;
-            background: root.dot-color;
-        }
+
         Text {
-            text: root.label;
-            color: #4a4660;
-            font-size: 12px;
-            font-weight: 600;
+            text: root.text;
+            color: #ffffff;
+            horizontal-alignment: center;
             vertical-alignment: center;
         }
     }
 }
 
-component PrimaryButton inherits Rectangle {
-    in property <string> label;
-    in property <bool> enabled: true;
-    callback clicked();
+component ErrorIcon inherits Rectangle {
+    width: 16px;
+    height: 16px;
+    border-radius: 8px;
+    background: Theme.critical;
 
-    height: 52px;
-    border-radius: 14px;
-    background: @linear-gradient(90deg, #7b61ff 0%, #5b8cff 100%);
-    opacity: root.enabled ? 1.0 : 0.45;
-
-    Text {
-        text: root.label;
-        color: white;
-        font-size: 16px;
-        font-weight: 600;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
+    Path {
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M 5.5 5.5 L 10.5 10.5 M 10.5 5.5 L 5.5 10.5";
+        stroke: Theme.dark ? #000000 : #ffffff;
+        stroke-width: 1.5px;
     }
 }
 
-component DangerButton inherits Rectangle {
-    in property <string> label;
-    in property <bool> enabled: true;
-    callback clicked();
+component LogPanel inherits Rectangle {
+    in property <[LogLine]> lines;
+    in property <string> font-family;
+    property <bool> follow: true;
 
-    height: 52px;
-    border-radius: 14px;
-    background: #d94a4a;
-    opacity: root.enabled ? 1.0 : 0.45;
-
-    Text {
-        text: root.label;
-        color: white;
-        font-size: 15px;
-        font-weight: 600;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
-}
-
-component GhostButton inherits Rectangle {
-    in property <string> label;
-    in property <bool> danger: false;
-    in property <bool> enabled: true;
-    callback clicked();
-
-    width: 94px;
-    height: 40px;
-    border-radius: 10px;
-    background: touch.has-hover && root.enabled
-        ? (root.danger ? #fdeeee : #f2efff)
-        : transparent;
+    background: Theme.log-bg;
     border-width: 1px;
-    border-color: root.danger ? #f0c9c9 : #e6e2f2;
-    opacity: root.enabled ? 1.0 : 0.4;
+    border-color: Theme.stroke;
+    border-radius: 6px;
+    clip: true;
 
-    touch := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
+    function stick() {
+        if (root.follow) {
+            scroll.content-y = min(0px, scroll.visible-height - scroll.content-height);
+        }
     }
-    Text {
-        text: root.label;
-        color: root.danger ? #c23b3b : #4f4968;
-        font-size: 13px;
-        font-weight: 600;
+
+    scroll := ScrollView {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+
+        changed content-height => {
+            root.stick();
+        }
+        changed visible-height => {
+            root.stick();
+        }
+        scrolled => {
+            root.follow = self.content-y <= self.visible-height - self.content-height + 8px;
+        }
+
+        VerticalLayout {
+            alignment: start;
+            padding: 12px;
+            spacing: 2px;
+
+            for line in root.lines: Text {
+                text: line.text;
+                color: line.error ? Theme.critical : Theme.text-secondary;
+                font-family: root.font-family;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    if root.lines.length == 0: Text {
+        text: "Nothing logged yet.";
+        color: Theme.text-tertiary;
         horizontal-alignment: center;
         vertical-alignment: center;
-    }
-}
-
-component TextLink inherits Rectangle {
-    in property <string> label;
-    in property <bool> active: false;
-    in property <length> link-width: 74px;
-    callback clicked();
-
-    width: root.link-width;
-    height: 24px;
-    background: transparent;
-
-    Text {
-        text: root.label;
-        color: root.active ? #5b4bd6 : #7a7590;
-        font-size: 12px;
-        font-weight: 600;
-        vertical-alignment: center;
-    }
-    TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
     }
 }
 
 export component MainWindow inherits Window {
     title: "Affinity";
-    preferred-width: 920px;
-    preferred-height: 660px;
-    min-width: 780px;
-    min-height: 580px;
-    background: @linear-gradient(140deg, #f8f6ff 0%, #eef4ff 55%, #fff4ef 100%);
+    default-font-size: 14px;
+    background: Theme.window-bg;
+    min-width: 520px;
+    preferred-width: 640px;
+    min-height: page.min-height;
+    preferred-height: page.preferred-height;
 
-    in-out property <string> state-text: "Checking system...";
-    in-out property <string> distro-text: "-";
-    in-out property <string> gpu-text: "-";
-    in-out property <string> wine-text: "-";
-    in-out property <string> deps-text: "-";
-    in-out property <string> prefix-text: "-";
-    in-out property <string> status-text: "";
-    in-out property <[LogLine]> logs: [];
-    in property <bool> installed: false;
-    in property <bool> busy: false;
-    in-out property <int> backend-index: 0;
-    in-out property <bool> opencl-enabled: false;
-    in-out property <bool> advanced-open: false;
-    in-out property <bool> details-open: false;
-    in-out property <bool> confirm-open: false;
+    in-out property <string> state-text: "Checking…";
+    in-out property <string> status-text;
+    in-out property <string> error-text;
+    in-out property <string> distro-text: "Checking…";
+    in-out property <string> gpu-text: "Checking…";
+    in-out property <string> wine-text: "Checking…";
+    in-out property <string> deps-text: "Checking…";
+    in-out property <string> prefix-text;
+    in-out property <[LogLine]> logs;
+    // Slint only resolves named families, so Rust fills in the system monospace font.
+    in property <string> mono-font: "DejaVu Sans Mono";
+    in property <bool> installed;
+    in property <bool> busy;
+    in property <bool> deps-ok: true;
+    in-out property <int> backend-index;
+    in-out property <bool> opencl-enabled;
+    in-out property <bool> details-open;
+    in-out property <bool> confirm-open;
+    // Height that fits the content exactly; used to shrink the window when the log closes.
+    out property <length> fit-height: page.preferred-height;
 
     callback install-clicked();
     callback launch-clicked();
     callback update-clicked();
     callback repair-clicked();
     callback uninstall-clicked();
+    callback details-toggled();
 
-    VerticalLayout {
-        padding-top: 28px;
-        padding-bottom: 28px;
-        padding-left: 40px;
-        padding-right: 40px;
-        spacing: 16px;
+    property <bool> failed: !root.busy && root.error-text != "";
+    property <string> headline: root.busy && root.status-text != "" ? root.status-text : root.state-text;
+    property <color> dot-color: root.busy ? Palette.accent-background : root.failed ? Theme.critical : root.installed ? Theme.success : Theme.text-tertiary;
+
+    function toggle-log() {
+        root.details-open = !root.details-open;
+        root.details-toggled();
+    }
+
+    page := VerticalLayout {
+        x: (root.width - self.width) / 2;
+        width: min(root.width, 840px);
+        height: root.height;
+        // Only the log grows; otherwise content stays at the top.
+        alignment: root.details-open ? LayoutAlignment.stretch : LayoutAlignment.start;
+        padding-left: 24px;
+        padding-right: 24px;
+        padding-top: 20px;
+        padding-bottom: 24px;
+        spacing: 20px;
 
         HorizontalLayout {
-            spacing: 12px;
-            Rectangle {
-                width: 38px;
-                height: 38px;
-                border-radius: 11px;
-                background: @linear-gradient(135deg, #7b61ff 0%, #5b8cff 100%);
-                Text {
-                    text: "A";
-                    color: white;
-                    font-size: 20px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
+            spacing: 16px;
+            vertical-stretch: 0;
+
             VerticalLayout {
-                spacing: 1px;
                 alignment: center;
+                horizontal-stretch: 1;
+                spacing: 2px;
+
                 Text {
                     text: "Affinity";
-                    font-size: 18px;
-                    font-weight: 700;
-                    color: #211f33;
-                }
-                Text {
-                    text: "Linux installer";
-                    font-size: 11px;
-                    color: #8a86a0;
-                }
-            }
-            Rectangle { horizontal-stretch: 1; }
-            Pill {
-                label: root.busy ? "Working" : (root.installed ? "Installed" : "Ready");
-                dot-color: root.busy ? #e0a23a : (root.installed ? #1f9d6a : #8a86a0);
-            }
-        }
-
-        Rectangle {
-            vertical-stretch: 1;
-            border-radius: 22px;
-            background: white;
-            border-width: 1px;
-            border-color: #ece9f6;
-            drop-shadow-blur: 30px;
-            drop-shadow-offset-y: 12px;
-            drop-shadow-color: #28204a14;
-
-            VerticalLayout {
-                padding: 36px;
-                spacing: 18px;
-
-                Text {
-                    text: root.installed ? "You're all set." : "Affinity, on Linux.";
-                    font-size: 34px;
-                    font-weight: 800;
-                    color: #1d1b2e;
-                }
-                Text {
-                    text: root.installed
-                        ? "Affinity v3 is installed. Open it, or keep it up to date."
-                        : "Install Affinity v3 in one click. Wine, graphics and the app are configured for you.";
-                    font-size: 14px;
-                    color: #6f6b85;
-                    wrap: word-wrap;
-                    width: 540px;
+                    color: Theme.text-primary;
+                    font-size: 20px;
+                    font-weight: 600;
                 }
 
                 HorizontalLayout {
-                    spacing: 10px;
-                    VerticalLayout {
-                        alignment: center;
+                    spacing: 8px;
+
+                    Rectangle {
+                        width: 8px;
+
                         Rectangle {
+                            y: (parent.height - self.height) / 2;
                             width: 8px;
                             height: 8px;
                             border-radius: 4px;
-                            background: root.busy ? #e0a23a : (root.installed ? #1f9d6a : #b5b0c8);
+                            background: root.dot-color;
                         }
                     }
+
                     Text {
-                        text: root.busy && root.status-text != ""
-                            ? root.status-text
-                            : (root.installed ? "Ready to launch" : "Ready to install");
-                        font-size: 12px;
-                        color: #8a86a0;
-                        vertical-alignment: center;
+                        text: root.headline;
+                        color: root.failed ? Theme.critical : Theme.text-secondary;
                         overflow: elide;
-                        horizontal-stretch: 1;
                     }
                 }
+            }
 
-                Rectangle { height: 1px; background: #f1eff8; }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 0;
 
-                if root.installed : HorizontalLayout {
-                    spacing: 10px;
-                    PrimaryButton {
-                        label: root.busy ? "Opening..." : "Open Affinity";
-                        enabled: !root.busy;
-                        horizontal-stretch: 1;
-                        clicked => { root.launch-clicked(); }
-                    }
-                    GhostButton { label: "Update"; enabled: !root.busy; clicked => { root.update-clicked(); } }
-                    GhostButton { label: "Repair"; enabled: !root.busy; clicked => { root.repair-clicked(); } }
-                    GhostButton { label: "Uninstall"; danger: true; enabled: !root.busy; clicked => { root.confirm-open = true; } }
-                }
-
-                if !root.installed : PrimaryButton {
-                    label: root.busy ? "Installing Affinity..." : "Install Affinity";
+                Button {
+                    primary: true;
+                    min-width: 120px;
+                    text: root.busy ? root.state-text : root.installed ? "Open" : "Install";
                     enabled: !root.busy;
-                    clicked => { root.install-clicked(); }
-                }
-
-                Rectangle { vertical-stretch: 1; }
-
-                if root.advanced-open : Rectangle {
-                    background: #f8f7fd;
-                    border-radius: 14px;
-                    border-width: 1px;
-                    border-color: #efedf7;
-                    VerticalLayout {
-                        padding: 16px;
-                        spacing: 12px;
-                        Text {
-                            text: "ADVANCED";
-                            font-size: 10px;
-                            font-weight: 700;
-                            color: #8a86a0;
-                            letter-spacing: 1px;
-                        }
-                        HorizontalLayout {
-                            spacing: 12px;
-                            Text {
-                                text: "GPU backend";
-                                width: 104px;
-                                font-size: 12px;
-                                color: #55516b;
-                                vertical-alignment: center;
-                            }
-                            ComboBox {
-                                model: ["vkd3d (recommended)", "DXVK"];
-                                current-index: root.backend-index;
-                                selected(value) => { root.backend-index = value == "DXVK" ? 1 : 0; }
-                            }
-                            CheckBox {
-                                text: "OpenCL support";
-                                checked: root.opencl-enabled;
-                                toggled => { root.opencl-enabled = self.checked; }
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                        Text {
-                            text: root.distro-text + "  ·  " + root.gpu-text;
-                            font-size: 11px;
-                            color: #8a86a0;
-                            wrap: word-wrap;
-                        }
-                        Text {
-                            text: "Wine " + root.wine-text + "  ·  " + root.deps-text;
-                            font-size: 11px;
-                            color: #8a86a0;
-                            wrap: word-wrap;
-                        }
-                    }
-                }
-
-                HorizontalLayout {
-                    spacing: 16px;
-                    TextLink {
-                        label: root.advanced-open ? "Advanced −" : "Advanced +";
-                        active: root.advanced-open;
-                        clicked => { root.advanced-open = !root.advanced-open; }
-                    }
-                    TextLink {
-                        label: root.details-open ? "Details −" : "Details +";
-                        active: root.details-open;
-                        link-width: 66px;
-                        clicked => { root.details-open = !root.details-open; }
-                    }
-                    Rectangle { horizontal-stretch: 1; }
-                    Text {
-                        text: root.prefix-text;
-                        font-size: 10px;
-                        color: #a5a1b6;
-                        vertical-alignment: center;
-                        overflow: elide;
-                        width: 320px;
-                        horizontal-alignment: right;
-                    }
-                }
-
-                if root.details-open : Rectangle {
-                    height: 150px;
-                    background: #17161f;
-                    border-radius: 12px;
-                    VerticalLayout {
-                        padding: 10px;
-                        spacing: 4px;
-                        Text {
-                            text: "ACTIVITY";
-                            color: #8b87a3;
-                            font-size: 9px;
-                            font-weight: 700;
-                            letter-spacing: 1px;
-                        }
-                        ListView {
-                            vertical-stretch: 1;
-                            for line in root.logs : Text {
-                                text: line.text;
-                                color: line.error ? #ff9d9d : #b9b4cf;
-                                font-family: "monospace";
-                                font-size: 10px;
-                                wrap: word-wrap;
-                            }
+                    clicked => {
+                        if (root.installed) {
+                            root.launch-clicked();
+                        } else {
+                            root.install-clicked();
                         }
                     }
                 }
             }
         }
 
-        Text {
-            text: "Requires a 64-bit Linux distribution with Vulkan support.";
-            font-size: 10px;
-            color: #a09cb3;
-            horizontal-alignment: center;
+        // Divider that turns into a progress bar while a job runs, without shifting the layout.
+        Rectangle {
+            height: 3px;
+            vertical-stretch: 0;
+
+            if !root.busy: Rectangle {
+                y: 1px;
+                height: 1px;
+                background: Theme.divider;
+            }
+
+            if root.busy: ProgressIndicator {
+                width: parent.width;
+                height: parent.height;
+                indeterminate: true;
+            }
+        }
+
+        if root.failed: Rectangle {
+            vertical-stretch: 0;
+            background: Theme.critical-bg;
+            border-width: 1px;
+            border-color: Theme.stroke;
+            border-radius: 6px;
+
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 12px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 12px;
+
+                VerticalLayout {
+                    alignment: start;
+                    padding-top: 2px;
+                    ErrorIcon { }
+                }
+
+                Text {
+                    text: root.error-text;
+                    color: Theme.text-primary;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                }
+
+                if !root.details-open: VerticalLayout {
+                    alignment: center;
+                    Button {
+                        text: "Show log";
+                        clicked => {
+                            root.toggle-log();
+                        }
+                    }
+                }
+            }
+        }
+
+        Section {
+            title: "System";
+
+            Card {
+                GridLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-top: 12px;
+                    padding-bottom: 12px;
+                    spacing-horizontal: 24px;
+                    spacing-vertical: 8px;
+
+                    Row {
+                        InfoLabel {
+                            text: "Distribution";
+                        }
+
+                        InfoValue {
+                            text: root.distro-text;
+                        }
+                    }
+
+                    Row {
+                        InfoLabel {
+                            text: "Graphics";
+                        }
+
+                        InfoValue {
+                            text: root.gpu-text;
+                        }
+                    }
+
+                    Row {
+                        InfoLabel {
+                            text: "Wine";
+                        }
+
+                        InfoValue {
+                            text: root.wine-text;
+                        }
+                    }
+
+                    Row {
+                        InfoLabel {
+                            text: "Dependencies";
+                        }
+
+                        InfoValue {
+                            text: root.deps-text;
+                            color: root.deps-ok ? Theme.text-primary : Theme.caution;
+                        }
+                    }
+
+                    Row {
+                        InfoLabel {
+                            text: "Location";
+                        }
+
+                        InfoValue {
+                            text: root.prefix-text;
+                        }
+                    }
+                }
+            }
+        }
+
+        Section {
+            title: "Options";
+
+            Card {
+                VerticalLayout {
+                    OptionRow {
+                        title: "Graphics backend";
+                        description: "Translates Direct3D to Vulkan.";
+
+                        ComboBox {
+                            width: 240px;
+                            model: ["vkd3d-proton (recommended)", "DXVK"];
+                            current-index <=> root.backend-index;
+                            enabled: !root.busy;
+                        }
+                    }
+
+                    Divider { }
+
+                    OptionRow {
+                        title: "OpenCL";
+                        description: "GPU acceleration for filters and effects.";
+
+                        Switch {
+                            horizontal-stretch: 0;
+                            checked <=> root.opencl-enabled;
+                            enabled: !root.busy;
+                        }
+                    }
+                }
+            }
+
+            Text {
+                text: "Changes apply the next time you install or repair.";
+                color: Theme.text-tertiary;
+                font-size: 12px;
+                vertical-stretch: 0;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            vertical-stretch: 0;
+
+            if root.installed: HorizontalLayout {
+                spacing: 8px;
+
+                Button {
+                    text: "Update";
+                    enabled: !root.busy;
+                    clicked => {
+                        root.update-clicked();
+                    }
+                }
+
+                Button {
+                    text: "Repair";
+                    enabled: !root.busy;
+                    clicked => {
+                        root.repair-clicked();
+                    }
+                }
+
+                Button {
+                    text: "Uninstall…";
+                    enabled: !root.busy;
+                    clicked => {
+                        root.confirm-open = true;
+                    }
+                }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            LogToggle {
+                expanded: root.details-open;
+                clicked => {
+                    root.toggle-log();
+                }
+            }
+        }
+
+        if root.details-open: LogPanel {
+            min-height: 140px;
+            preferred-height: 220px;
+            vertical-stretch: 1;
+            lines: root.logs;
+            font-family: root.mono-font;
         }
     }
 
-    if root.confirm-open : Rectangle {
+    if root.confirm-open: FocusScope {
         x: 0;
         y: 0;
-        width: 100%;
-        height: 100%;
-        background: #1d1b2e66;
+        width: root.width;
+        height: root.height;
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.confirm-open = false;
+                return accept;
+            }
+            return reject;
+        }
 
         Rectangle {
-            x: (root.width - 400px) / 2;
-            y: (root.height - 236px) / 2;
-            width: 400px;
-            height: 236px;
-            border-radius: 18px;
-            background: white;
-            drop-shadow-blur: 40px;
-            drop-shadow-offset-y: 16px;
-            drop-shadow-color: #1d1b2e40;
+            background: Theme.scrim;
+        }
 
-            VerticalLayout {
-                padding: 24px;
-                spacing: 12px;
-                Text {
-                    text: "Uninstall Affinity?";
-                    font-size: 18px;
-                    font-weight: 700;
-                    color: #1d1b2e;
-                }
-                Text {
-                    text: "This removes the app, its Wine prefix and desktop entries. Your Affinity files are not touched.";
-                    font-size: 12px;
-                    color: #6f6b85;
-                    wrap: word-wrap;
-                }
-                Rectangle { vertical-stretch: 1; }
-                HorizontalLayout {
-                    spacing: 10px;
-                    Rectangle { horizontal-stretch: 1; }
-                    GhostButton {
-                        label: "Cancel";
-                        clicked => { root.confirm-open = false; }
+        // Swallows clicks so the page underneath stays inert.
+        TouchArea { }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(440px, parent.width - 48px);
+            height: dialog.preferred-height;
+            background: Theme.dialog-bg;
+            border-width: 1px;
+            border-color: Theme.stroke;
+            border-radius: 8px;
+            drop-shadow-blur: 32px;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-color: #00000052;
+
+            dialog := VerticalLayout {
+                padding: 1px;
+
+                VerticalLayout {
+                    padding: 24px;
+                    spacing: 12px;
+
+                    Text {
+                        text: "Uninstall Affinity?";
+                        color: Theme.text-primary;
+                        font-size: 20px;
+                        font-weight: 600;
                     }
-                    DangerButton {
-                        label: "Uninstall";
-                        width: 120px;
-                        height: 40px;
-                        clicked => {
-                            root.confirm-open = false;
-                            root.uninstall-clicked();
+
+                    Text {
+                        text: "This deletes " + root.prefix-text + ", including Wine and Affinity, and removes the menu entries. Files saved outside this folder are kept.";
+                        color: Theme.text-primary;
+                        wrap: word-wrap;
+                    }
+                }
+
+                Rectangle {
+                    background: Theme.dialog-footer;
+                    border-bottom-left-radius: 7px;
+                    border-bottom-right-radius: 7px;
+
+                    HorizontalLayout {
+                        padding: 24px;
+                        spacing: 8px;
+                        alignment: end;
+
+                        DangerButton {
+                            text: "Uninstall";
+                            clicked => {
+                                root.confirm-open = false;
+                                root.uninstall-clicked();
+                            }
+                        }
+
+                        Button {
+                            text: "Cancel";
+                            min-width: 96px;
+                            clicked => {
+                                root.confirm-open = false;
+                            }
                         }
                     }
                 }

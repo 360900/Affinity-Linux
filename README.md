@@ -14,6 +14,7 @@ Wine pipeline.
 | M4 | Affinity installer, MSI fallback, patches, PluginLoader, facades, WebView2 | done |
 | M5 | GPU backends, launch environment, corruption guard, uninstall, full GUI wiring | done |
 | M6 | One-click UI redesign, repair and update flows, advanced panel | done |
+| M7 | Native Fluent UI (light/dark), compact layout, visible errors, live log | done |
 
 ## Build
 

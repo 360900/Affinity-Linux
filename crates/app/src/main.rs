@@ -1,7 +1,8 @@
 slint::include_modules!();
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
@@ -20,13 +21,13 @@ use affinity_linux_core::packages::{self, Elevation, PlanRunOptions};
 use affinity_linux_core::runner::Stream;
 use affinity_linux_core::uninstall;
 use affinity_linux_core::wine;
-use slint::{ComponentHandle, Model, VecModel};
+use slint::{ComponentHandle, LogicalSize, Model, VecModel};
 
 enum UiEvent {
     Doctor(Box<DoctorReport>),
     Log(String, bool),
     JobDone(&'static str),
-    JobFailed(String),
+    JobFailed(&'static str, String),
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -38,13 +39,18 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let logs: Rc<VecModel<LogLine>> = Rc::new(VecModel::from(Vec::new()));
     ui.set_logs(logs.clone().into());
-    ui.set_prefix_text(cfg.prefix.display().to_string().into());
+    ui.set_prefix_text(display_path(&cfg.prefix).into());
     ui.set_backend_index(if cfg.gpu_backend == GpuBackend::Dxvk {
         1
     } else {
         0
     });
     ui.set_opencl_enabled(cfg.opencl);
+    if let Some(family) = monospace_family() {
+        ui.set_mono_font(family.into());
+    }
+    ui.set_busy(true);
+    ui.set_status_text("Checking your system…".into());
 
     let (tx, rx) = mpsc::channel::<UiEvent>();
     spawn_doctor(cfg.clone(), tx.clone());
@@ -58,15 +64,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             };
             let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
-            let backend = if ui.get_backend_index() == 1 {
-                GpuBackend::Dxvk
-            } else {
-                GpuBackend::Vkd3d
-            };
-            let opencl = ui.get_opencl_enabled();
-            ui.set_busy(true);
-            ui.set_state_text("Installing Affinity...".into());
-            ui.set_status_text("Starting...".into());
+            let (backend, opencl) = selected_options(&ui);
+            start_job(&ui, "Installing…");
             spawn_install(cfg, backend, opencl, tx.clone());
         });
     }
@@ -79,9 +78,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             };
             let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
-            ui.set_busy(true);
-            ui.set_state_text("Opening Affinity...".into());
-            ui.set_status_text("Starting...".into());
+            start_job(&ui, "Opening…");
             spawn_launch(cfg, tx.clone());
         });
     }
@@ -94,9 +91,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             };
             let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
-            ui.set_busy(true);
-            ui.set_state_text("Updating Affinity...".into());
-            ui.set_status_text("Starting...".into());
+            start_job(&ui, "Updating…");
             spawn_update(cfg, tx.clone());
         });
     }
@@ -109,15 +104,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             };
             let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
-            let backend = if ui.get_backend_index() == 1 {
-                GpuBackend::Dxvk
-            } else {
-                GpuBackend::Vkd3d
-            };
-            let opencl = ui.get_opencl_enabled();
-            ui.set_busy(true);
-            ui.set_state_text("Repairing Affinity...".into());
-            ui.set_status_text("Starting...".into());
+            let (backend, opencl) = selected_options(&ui);
+            start_job(&ui, "Repairing…");
             spawn_repair(cfg, backend, opencl, tx.clone());
         });
     }
@@ -130,16 +118,25 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             };
             let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
-            ui.set_busy(true);
-            ui.set_state_text("Removing Affinity...".into());
-            ui.set_status_text("Starting...".into());
+            start_job(&ui, "Uninstalling…");
             spawn_uninstall(cfg, tx.clone());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_details_toggled(move || {
+            if let Some(ui) = weak.upgrade() {
+                fit_window(&ui);
+            }
         });
     }
 
     let weak = ui.as_weak();
     let logs = logs.clone();
     let tx = tx.clone();
+    let mut checking = true;
+    // Set after a job so the follow-up system check keeps its result message.
+    let mut keep_state = false;
     let timer = slint::Timer::default();
     timer.start(
         slint::TimerMode::Repeated,
@@ -150,25 +147,43 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             while let Ok(event) = rx.try_recv() {
                 match event {
-                    UiEvent::Doctor(report) => apply_report(&ui, &logs, *report),
+                    UiEvent::Doctor(report) => {
+                        if checking {
+                            checking = false;
+                            ui.set_busy(false);
+                        }
+                        apply_report(&ui, &logs, *report, keep_state);
+                        keep_state = false;
+                        fit_window(&ui);
+                    }
                     UiEvent::Log(text, error) => {
-                        ui.set_status_text(text.clone().into());
+                        if !error {
+                            ui.set_status_text(text.clone().into());
+                        }
                         push_log(&logs, text, error);
                     }
                     UiEvent::JobDone(kind) => {
                         ui.set_busy(false);
-                        ui.set_state_text(job_state(kind).into());
-                        ui.set_status_text("Done".into());
+                        ui.set_state_text(done_state(kind).into());
+                        ui.set_status_text("".into());
+                        match kind {
+                            "install" => ui.set_installed(true),
+                            "uninstall" => ui.set_installed(false),
+                            _ => {}
+                        }
+                        keep_state = kind != "install";
                         push_log(&logs, format!("{kind}: finished"), false);
-                        let cfg = Config::load().unwrap_or_default();
-                        spawn_doctor(cfg, tx.clone());
+                        spawn_doctor(Config::load().unwrap_or_default(), tx.clone());
                     }
-                    UiEvent::JobFailed(message) => {
+                    UiEvent::JobFailed(kind, message) => {
                         ui.set_busy(false);
-                        ui.set_state_text("Something went wrong.".into());
-                        ui.set_status_text(message.clone().into());
-                        ui.set_details_open(true);
+                        ui.set_state_text(failed_state(kind).into());
+                        ui.set_status_text("".into());
+                        ui.set_error_text(message.clone().into());
+                        keep_state = true;
                         push_log(&logs, format!("error: {message}"), true);
+                        spawn_doctor(Config::load().unwrap_or_default(), tx.clone());
+                        fit_window(&ui);
                     }
                 }
             }
@@ -178,15 +193,90 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.run()
 }
 
-fn job_state(kind: &str) -> &'static str {
+fn selected_options(ui: &MainWindow) -> (GpuBackend, bool) {
+    let backend = if ui.get_backend_index() == 1 {
+        GpuBackend::Dxvk
+    } else {
+        GpuBackend::Vkd3d
+    };
+    (backend, ui.get_opencl_enabled())
+}
+
+fn start_job(ui: &MainWindow, state: &str) {
+    ui.set_busy(true);
+    ui.set_error_text("".into());
+    ui.set_state_text(state.into());
+    ui.set_status_text("Starting…".into());
+    fit_window(ui);
+}
+
+fn done_state(kind: &str) -> &'static str {
     match kind {
-        "install" => "Affinity is installed.",
-        "update" => "Affinity is up to date.",
-        "repair" => "Affinity has been repaired.",
-        "uninstall" => "Affinity has been removed.",
-        "launch" => "Affinity is running.",
-        _ => "Done.",
+        "install" => "Installed",
+        "update" => "Updated",
+        "repair" => "Repaired",
+        "launch" => "Started. It may take a moment to appear.",
+        "uninstall" => "Uninstalled",
+        _ => "Done",
     }
+}
+
+fn failed_state(kind: &str) -> &'static str {
+    match kind {
+        "install" => "Installation failed",
+        "update" => "Update failed",
+        "repair" => "Repair failed",
+        "launch" => "Couldn't open Affinity",
+        "uninstall" => "Uninstall failed",
+        _ => "Something went wrong",
+    }
+}
+
+/// Resizes the window to its content height. With the log open it only grows,
+/// so a window the user made taller keeps its size.
+fn fit_window(ui: &MainWindow) {
+    let window = ui.window();
+    if window.is_maximized() || window.is_fullscreen() {
+        return;
+    }
+    let current = window.size().to_logical(window.scale_factor());
+    if current.width <= 0.0 {
+        return;
+    }
+    let fit = ui.get_fit_height();
+    let height = if ui.get_details_open() {
+        current.height.max(fit)
+    } else {
+        fit
+    };
+    if (height - current.height).abs() < 0.5 {
+        return;
+    }
+    let size = LogicalSize::new(current.width, height);
+    if height > current.height {
+        window.set_size(size);
+        return;
+    }
+    // Shrink once Slint has applied the smaller minimum size, otherwise the
+    // window manager may clamp the request to the old minimum.
+    let weak = ui.as_weak();
+    slint::Timer::single_shot(Duration::from_millis(1), move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.window().set_size(size);
+        }
+    });
+}
+
+fn monospace_family() -> Option<String> {
+    let output = Command::new("fc-match")
+        .args(["--format=%{family[0]}", "monospace"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let family = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!family.is_empty()).then_some(family)
 }
 
 fn push_log(logs: &Rc<VecModel<LogLine>>, text: String, error: bool) {
@@ -212,7 +302,7 @@ fn spawn_install(cfg: Config, backend: GpuBackend, opencl: bool, tx: Sender<UiEv
             let _ = tx.send(UiEvent::JobDone("install"));
         }
         Err(error) => {
-            let _ = tx.send(UiEvent::JobFailed(format!("{error:#}")));
+            let _ = tx.send(UiEvent::JobFailed("install", format!("{error:#}")));
         }
     });
 }
@@ -369,7 +459,7 @@ fn spawn_update(cfg: Config, tx: Sender<UiEvent>) {
                 let _ = tx.send(UiEvent::JobDone("update"));
             }
             Err(error) => {
-                let _ = tx.send(UiEvent::JobFailed(format!("{error:#}")));
+                let _ = tx.send(UiEvent::JobFailed("update", format!("{error:#}")));
             }
         }
     });
@@ -423,7 +513,7 @@ fn spawn_repair(cfg: Config, backend: GpuBackend, opencl: bool, tx: Sender<UiEve
                 let _ = tx.send(UiEvent::JobDone("repair"));
             }
             Err(error) => {
-                let _ = tx.send(UiEvent::JobFailed(format!("{error:#}")));
+                let _ = tx.send(UiEvent::JobFailed("repair", format!("{error:#}")));
             }
         }
     });
@@ -456,7 +546,7 @@ fn spawn_launch(cfg: Config, tx: Sender<UiEvent>) {
                 let _ = tx.send(UiEvent::JobDone("launch"));
             }
             Err(error) => {
-                let _ = tx.send(UiEvent::JobFailed(format!("{error:#}")));
+                let _ = tx.send(UiEvent::JobFailed("launch", format!("{error:#}")));
             }
         }
     });
@@ -496,29 +586,32 @@ fn spawn_uninstall(cfg: Config, tx: Sender<UiEvent>) {
                 let _ = tx.send(UiEvent::JobDone("uninstall"));
             }
             Err(error) => {
-                let _ = tx.send(UiEvent::JobFailed(format!("{error:#}")));
+                let _ = tx.send(UiEvent::JobFailed("uninstall", format!("{error:#}")));
             }
         }
     });
 }
 
-fn apply_report(ui: &MainWindow, logs: &Rc<VecModel<LogLine>>, report: DoctorReport) {
-    let package_manager = report.package_manager.as_deref().unwrap_or("not found");
-    let distro = format!(
-        "{} ({} family, {})",
-        report.os.name(),
-        report.family.label(),
-        package_manager
-    );
+fn apply_report(
+    ui: &MainWindow,
+    logs: &Rc<VecModel<LogLine>>,
+    report: DoctorReport,
+    keep_state: bool,
+) {
+    let package_manager = report.package_manager.as_deref();
+    let distro = match package_manager {
+        Some(pm) => format!("{} ({pm})", report.os.name()),
+        None => format!("{} (no supported package manager)", report.os.name()),
+    };
     let gpu = if report.gpus.is_empty() {
-        "none detected".to_string()
+        "None detected".to_string()
     } else {
         report
             .gpus
             .iter()
-            .map(|gpu| format!("{} [{}]", gpu.name, gpu.vendor.label()))
+            .map(gpu_label)
             .collect::<Vec<_>>()
-            .join(" | ")
+            .join(", ")
     };
     let found = report.deps.iter().filter(|dep| dep.found).count();
     let missing: Vec<&str> = report
@@ -528,42 +621,146 @@ fn apply_report(ui: &MainWindow, logs: &Rc<VecModel<LogLine>>, report: DoctorRep
         .map(|dep| dep.command)
         .collect();
     let deps = if missing.is_empty() {
-        "all required dependencies present".to_string()
+        "All present".to_string()
     } else {
-        format!("missing: {}", missing.join(", "))
+        format!("Missing: {}", missing.join(", "))
     };
     let wine = report
         .wine_build
         .clone()
-        .unwrap_or_else(|| "not installed".into());
+        .unwrap_or_else(|| "Not installed".into());
 
-    ui.set_distro_text(distro.clone().into());
-    ui.set_gpu_text(gpu.clone().into());
-    ui.set_deps_text(deps.clone().into());
+    ui.set_distro_text(distro.into());
+    ui.set_gpu_text(gpu.into());
+    ui.set_deps_text(deps.into());
+    ui.set_deps_ok(missing.is_empty());
     ui.set_wine_text(wine.clone().into());
-    ui.set_prefix_text(report.prefix.display().to_string().into());
+    ui.set_prefix_text(display_path(&report.prefix).into());
     ui.set_installed(report.installed);
-
-    let state = if report.installed {
-        "Affinity is ready to use."
-    } else {
-        "Install Affinity to get started."
-    };
-    ui.set_state_text(state.into());
-    if !ui.get_busy() {
-        ui.set_status_text("System ready".into());
+    if !keep_state && !ui.get_busy() {
+        let state = if report.installed {
+            "Installed"
+        } else {
+            "Not installed"
+        };
+        ui.set_state_text(state.into());
     }
 
-    let missing_required = !missing.is_empty();
-    push_log(logs, format!("system: {distro}"), false);
-    push_log(logs, format!("gpu: {gpu}"), false);
-    push_log(logs, format!("wine: {wine}"), false);
+    let gpus = report
+        .gpus
+        .iter()
+        .map(|gpu| format!("{} [{}]", gpu.name, gpu.vendor.label()))
+        .collect::<Vec<_>>();
     push_log(
         logs,
-        format!("deps: {found}/{} found, {deps}", report.deps.len()),
-        missing_required,
+        format!(
+            "system: {} ({} family, {})",
+            report.os.name(),
+            report.family.label(),
+            package_manager.unwrap_or("no package manager")
+        ),
+        false,
     );
+    push_log(
+        logs,
+        if gpus.is_empty() {
+            "gpu: none detected".to_string()
+        } else {
+            format!("gpu: {}", gpus.join(" | "))
+        },
+        false,
+    );
+    push_log(logs, format!("wine: {wine}"), false);
+    let mut deps_line = format!("deps: {found}/{} found", report.deps.len());
+    if !missing.is_empty() {
+        deps_line.push_str(&format!(", missing: {}", missing.join(", ")));
+    }
+    push_log(logs, deps_line, !missing.is_empty());
     for error in &report.errors {
         push_log(logs, format!("error: {error}"), true);
+    }
+}
+
+/// Turns an lspci name such as "NVIDIA Corporation GB203 [GeForce RTX 5080]"
+/// into "NVIDIA GeForce RTX 5080".
+fn gpu_label(gpu: &gpu::Gpu) -> String {
+    let name = gpu.name.trim();
+    let (brand, vendor_names): (&str, &[&str]) = match gpu.vendor {
+        Vendor::Nvidia => ("NVIDIA", &["NVIDIA Corporation"]),
+        Vendor::Amd => (
+            "AMD",
+            &[
+                "Advanced Micro Devices, Inc. [AMD/ATI]",
+                "Advanced Micro Devices, Inc. [AMD]",
+                "Advanced Micro Devices, Inc.",
+            ],
+        ),
+        Vendor::Intel => ("Intel", &["Intel Corporation"]),
+        Vendor::Other => return name.to_string(),
+    };
+    let device = vendor_names
+        .iter()
+        .find_map(|vendor| name.strip_prefix(vendor))
+        .unwrap_or(name)
+        .trim();
+    let model = match device.rfind('[') {
+        Some(start) if device.ends_with(']') => &device[start + 1..device.len() - 1],
+        _ => device,
+    };
+    if model.is_empty() {
+        name.to_string()
+    } else {
+        format!("{brand} {model}")
+    }
+}
+
+fn display_path(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match home
+        .as_deref()
+        .and_then(|home| path.strip_prefix(home).ok())
+    {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn label(vendor: Vendor, name: &str) -> String {
+        gpu_label(&gpu::Gpu {
+            vendor,
+            name: name.to_string(),
+        })
+    }
+
+    #[test]
+    fn gpu_labels_use_marketing_names() {
+        assert_eq!(
+            label(Vendor::Nvidia, "NVIDIA Corporation GB203 [GeForce RTX 5080]"),
+            "NVIDIA GeForce RTX 5080"
+        );
+        assert_eq!(
+            label(
+                Vendor::Amd,
+                "Advanced Micro Devices, Inc. [AMD/ATI] Navi 22 [Radeon RX 6700 XT]"
+            ),
+            "AMD Radeon RX 6700 XT"
+        );
+        assert_eq!(
+            label(Vendor::Amd, "Advanced Micro Devices, Inc. [AMD/ATI] Device 7480"),
+            "AMD Device 7480"
+        );
+        assert_eq!(
+            label(Vendor::Intel, "Intel Corporation UHD Graphics 620"),
+            "Intel UHD Graphics 620"
+        );
+        assert_eq!(
+            label(Vendor::Other, "Red Hat, Inc. Virtio 1.0 GPU"),
+            "Red Hat, Inc. Virtio 1.0 GPU"
+        );
     }
 }
