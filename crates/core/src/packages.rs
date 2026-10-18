@@ -124,13 +124,24 @@ fn arch_plan(multilib_enabled: bool) -> (String, Vec<PackageStep>) {
     }
     steps.push(PackageStep::root(
         "Install Wine and build dependencies",
-        "pacman -Syu --needed --noconfirm wine winetricks wget curl p7zip unzip tar jq zstd xz pciutils",
+        pacman_install(
+            "-Syu",
+            "wine winetricks wget curl 7zip unzip tar jq zstd xz pciutils",
+        ),
     ));
     steps.push(PackageStep::root_optional(
         "Install .NET SDKs",
-        "pacman -S --needed --noconfirm dotnet-sdk dotnet-sdk-8.0 dotnet-sdk-10.0",
+        pacman_install("-S", "dotnet-sdk dotnet-sdk-8.0 dotnet-sdk-10.0"),
     ));
     ("arch".to_string(), steps)
+}
+
+/// Skips names already satisfied by an installed package (e.g. `wine` via
+/// `wine-staging`), so pacman does not try to replace a conflicting provider.
+fn pacman_install(op: &str, packages: &str) -> String {
+    format!(
+        "missing=$(pacman -T {packages}); [ -z \"$missing\" ] || pacman {op} --needed --noconfirm $missing"
+    )
 }
 
 fn ubuntu_plan(os: &OsRelease) -> (String, Vec<PackageStep>) {
@@ -302,7 +313,10 @@ pub fn amd_opencl_plan(os: &OsRelease) -> PackagePlan {
     match family {
         Family::Arch => steps.push(PackageStep::root_optional(
             "Install AMD OpenCL packages",
-            "pacman -S --needed --noconfirm opencl-mesa ocl-icd rocm-opencl-runtime rocm-hip wine-opencl",
+            pacman_install(
+                "-S",
+                "opencl-mesa ocl-icd rocm-opencl-runtime rocm-hip wine-opencl",
+            ),
         )),
         Family::Fedora => {
             if id == "fedora" && major >= 43 {
@@ -515,6 +529,7 @@ mod tests {
         let plan = plan_for("ID=cachyos\nID_LIKE=arch\n");
         assert_eq!(plan.family, Family::Arch);
         assert!(scripts(&plan).contains("pacman -Syu"));
+        assert!(scripts(&plan).contains("missing=$(pacman -T wine "));
         assert!(plan.notes.is_empty());
     }
 
