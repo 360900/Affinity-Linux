@@ -12,7 +12,7 @@ use crate::http;
 use crate::journal::Report;
 use crate::manifest::now_epoch;
 use crate::runner::{self, RunOptions, RunResult, Stream};
-use crate::{WINE_DIR_NAME, app_exe};
+use crate::{WINE_DIR_NAME, app_exe, seven_zip_out};
 
 pub const INSTALLER_URL: &str = "https://downloads.affinity.studio/Affinity%20x64.exe";
 pub const INSTALLER_NAME: &str = "Affinity-x64.exe";
@@ -213,8 +213,8 @@ fn msi_fallback(
 
     let mut extract = Command::new("7z");
     extract
-        .args(["x", "-t#", "-y", "-o"])
-        .arg(&temp)
+        .args(["x", "-t#", "-y"])
+        .arg(seven_zip_out(&temp))
         .arg(installer);
     let result = run(report, extract, &[], Duration::from_secs(1800))?;
     if !result.success() {

@@ -41,6 +41,8 @@ pub struct SetupOptions {
     pub log_path: Option<PathBuf>,
     /// Force a specific build. Switching inside an initialized prefix is refused.
     pub wine_version: Option<String>,
+    /// Wine DPI (LogPixels) to write; `None` leaves the prefix's DPI alone.
+    pub dpi: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -119,7 +121,7 @@ where
         kill_prefix(prefix, Some(&wine_dir), &mut report)?;
         let mut cmd = Command::new(wine_dir.join("bin/wineboot"));
         cmd.arg("-u");
-        let mut run_opts = stream_opts(&report.log, Some(Duration::from_secs(900)));
+        let mut run_opts = stream_opts(Some(Duration::from_secs(900)));
         run_opts.envs = wine_env(prefix, &wine_dir);
         let result = run_logged(&mut report, cmd, run_opts)?;
         if !result.success() {
@@ -132,6 +134,9 @@ where
 
     let failed_components = install_components(prefix, opts.dry_run, &mut report)?;
     configure_prefix(prefix, opts.dry_run, &mut report)?;
+    if let Some(dpi) = opts.dpi {
+        set_dpi(prefix, dpi, opts.dry_run, &mut report)?;
+    }
 
     if !opts.dry_run {
         let registry_path = prefix.join("system.reg");
@@ -238,7 +243,7 @@ fn install_components(prefix: &Path, dry_run: bool, report: &mut Report) -> Resu
         }
 
         kill_prefix(prefix, Some(&wine_dir), report)?;
-        let mut run_opts = stream_opts(&report.log, Some(Duration::from_secs(1200)));
+        let mut run_opts = stream_opts(Some(Duration::from_secs(1200)));
         run_opts.envs = wine_env(prefix, &wine_dir);
         let result = run_logged(report, cmd, run_opts)?;
 
@@ -272,7 +277,7 @@ fn configure_prefix(prefix: &Path, dry_run: bool, report: &mut Report) -> Result
         kill_prefix(prefix, Some(&wine_dir), report)?;
         let mut cmd = Command::new(&winecfg);
         cmd.args(["-v", "win11"]);
-        let mut run_opts = stream_opts(&report.log, Some(Duration::from_secs(300)));
+        let mut run_opts = stream_opts(Some(Duration::from_secs(300)));
         run_opts.envs = wine_env(prefix, &wine_dir);
         let result = run_logged(report, cmd, run_opts)?;
         if !result.success() {
@@ -304,7 +309,7 @@ fn configure_prefix(prefix: &Path, dry_run: bool, report: &mut Report) -> Result
     if regedit.is_file() {
         let mut cmd = Command::new(&regedit);
         cmd.arg(&theme_path);
-        let mut run_opts = stream_opts(&report.log, Some(Duration::from_secs(120)));
+        let mut run_opts = stream_opts(Some(Duration::from_secs(120)));
         run_opts.envs = wine_env(prefix, &wine_dir);
         let result = run_logged(report, cmd, run_opts)?;
         if !result.success() {
@@ -312,6 +317,122 @@ fn configure_prefix(prefix: &Path, dry_run: bool, report: &mut Report) -> Result
         }
     }
     let _ = fs::remove_file(&theme_path);
+    Ok(())
+}
+
+/// How the X server Wine draws on relates to the real display. Wine always
+/// runs under X11 here, which on Wayland means XWayland.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XScaling {
+    /// X11 clients get physical pixels: X11 sessions, KDE's default.
+    Physical,
+    /// GNOME's default: mutter renders X11 clients at 1x and upscales them.
+    Upscaled,
+    /// GNOME with `xwayland-native-scaling`: X11 clients get a canvas at the
+    /// scale rounded up (2x at 125%), which mutter then shrinks.
+    RoundedUp,
+}
+
+impl XScaling {
+    pub fn label(&self) -> &'static str {
+        match self {
+            XScaling::Physical => "physical pixels",
+            XScaling::Upscaled => "GNOME upscales X11 apps",
+            XScaling::RoundedUp => "GNOME XWayland native scaling",
+        }
+    }
+}
+
+pub fn detect_x_scaling() -> XScaling {
+    let gnome = std::env::var("XDG_CURRENT_DESKTOP")
+        .map(|desktop| desktop.to_ascii_lowercase().contains("gnome"))
+        .unwrap_or(false);
+    if !gnome || !crate::launch::wayland_session() {
+        return XScaling::Physical;
+    }
+    let features = Command::new("gsettings")
+        .args(["get", "org.gnome.mutter", "experimental-features"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    if has_native_xwayland_scaling(&features) {
+        XScaling::RoundedUp
+    } else {
+        XScaling::Upscaled
+    }
+}
+
+fn has_native_xwayland_scaling(features: &str) -> bool {
+    features.contains("'xwayland-native-scaling'")
+}
+
+/// Wine DPI for a display, in the 12-DPI steps of Wine's scaling slider.
+/// With physical pixels it is the larger of a resolution-based value and the
+/// host scale. `resolution` is the monitor's physical size; without it only
+/// the scale counts.
+pub fn recommended_dpi(resolution: Option<(u32, u32)>, scale: f32, x: XScaling) -> u32 {
+    match x {
+        XScaling::Physical => {}
+        XScaling::Upscaled => return 96,
+        XScaling::RoundedUp => return (96 * scale.ceil().max(1.0) as u32).min(480),
+    }
+    let by_resolution = match resolution {
+        Some((width, height)) if width >= 3840 || height >= 2160 => 192,
+        Some((width, height)) if width >= 2560 || height >= 1440 => 144,
+        _ => 96,
+    };
+    let steps = (96.0 * f64::from(scale) / 12.0).round() as u32;
+    let by_scale = (steps * 12).clamp(96, 480);
+    by_resolution.max(by_scale)
+}
+
+/// Write the Wine DPI into an existing prefix, e.g. during a repair.
+pub fn apply_dpi<F>(
+    prefix: &Path,
+    dpi: u32,
+    dry_run: bool,
+    log_path: Option<PathBuf>,
+    on_line: F,
+) -> Result<()>
+where
+    F: FnMut(Stream, &str),
+{
+    let mut sink = on_line;
+    let mut report = Report::new(log_path, &mut sink);
+    set_dpi(prefix, dpi, dry_run, &mut report)
+}
+
+fn set_dpi(prefix: &Path, dpi: u32, dry_run: bool, report: &mut Report) -> Result<()> {
+    let wine_dir = prefix.join(WINE_DIR_NAME);
+    report.info(format!(
+        "setting Wine DPI to {dpi} ({}%)",
+        (dpi * 100 + 48) / 96
+    ));
+    let mut cmd = Command::new(wine_dir.join("bin/wine"));
+    cmd.args([
+        "reg",
+        "add",
+        "HKEY_CURRENT_USER\\Control Panel\\Desktop",
+        "/v",
+        "LogPixels",
+        "/t",
+        "REG_DWORD",
+        "/d",
+        &dpi.to_string(),
+        "/f",
+    ]);
+    if dry_run {
+        report.info(format!("    {}", describe(&cmd)));
+        return Ok(());
+    }
+    let mut run_opts = stream_opts(Some(Duration::from_secs(120)));
+    run_opts.envs = wine_env(prefix, &wine_dir);
+    let result = run_logged(report, cmd, run_opts)?;
+    if !result.success() {
+        report.warn("could not set the Wine DPI; continuing");
+    }
     Ok(())
 }
 
@@ -457,7 +578,7 @@ fn install_wine(
             .arg("-C")
             .arg(prefix)
             .args(["--no-same-owner", "--overwrite"]);
-        let run_opts = stream_opts(&report.log, Some(Duration::from_secs(1800)));
+        let run_opts = stream_opts(Some(Duration::from_secs(1800)));
         let result = run_logged(report, cmd, run_opts)?;
         let _ = fs::remove_file(&archive);
         if !result.success() {
@@ -559,7 +680,7 @@ fn verify_wine(prefix: &Path, dry_run: bool, report: &mut Report) -> Result<()> 
 
     let mut cmd = Command::new(&wine);
     cmd.arg("--version");
-    let mut run_opts = stream_opts(&report.log, Some(Duration::from_secs(120)));
+    let mut run_opts = stream_opts(Some(Duration::from_secs(120)));
     run_opts.envs = wine_env(prefix, &prefix.join(WINE_DIR_NAME));
     let result = run_logged(report, cmd, run_opts)?;
     if !result.success() {
@@ -603,7 +724,7 @@ fn download(report: &mut Report, url: &str, destination: &Path) -> Result<()> {
         bail!("neither curl nor wget was found on PATH");
     };
 
-    let run_opts = stream_opts(&report.log, None);
+    let run_opts = stream_opts(None);
     let result = run_logged(report, cmd, run_opts)?;
     if !result.success() {
         bail!("download failed\n{}", result.tail_text(10));
@@ -625,7 +746,7 @@ fn kill_prefix(prefix: &Path, wine_dir: Option<&Path>, report: &mut Report) -> R
 
     let mut cmd = Command::new(wineserver);
     cmd.arg("-k");
-    let mut run_opts = stream_opts(&report.log, Some(Duration::from_secs(30)));
+    let mut run_opts = stream_opts(Some(Duration::from_secs(30)));
     run_opts.echo = false;
     run_opts
         .envs
@@ -649,13 +770,11 @@ fn wine_env(prefix: &Path, wine_dir: &Path) -> Vec<(String, String)> {
     ]
 }
 
-fn stream_opts(log: &Option<PathBuf>, stall: Option<Duration>) -> RunOptions {
+/// No log file here: `run_logged` already writes every line through the report.
+fn stream_opts(stall: Option<Duration>) -> RunOptions {
     let mut options = RunOptions::default();
     if let Some(stall) = stall {
         options = options.stall(stall);
-    }
-    if let Some(path) = log {
-        options = options.log(path).log_append();
     }
     options
 }
@@ -696,7 +815,49 @@ mod tests {
             dry_run: true,
             log_path: None,
             wine_version: None,
+            dpi: None,
         }
+    }
+
+    #[test]
+    fn dpi_follows_resolution_and_scale() {
+        let physical = XScaling::Physical;
+        // 4K panel at 225%: the scale wins.
+        assert_eq!(recommended_dpi(Some((3840, 2400)), 2.25, physical), 216);
+        // 4K at 100%: the resolution wins.
+        assert_eq!(recommended_dpi(Some((3840, 2160)), 1.0, physical), 192);
+        assert_eq!(recommended_dpi(Some((2560, 1440)), 1.25, physical), 144);
+        assert_eq!(recommended_dpi(Some((1920, 1080)), 1.0, physical), 96);
+        assert_eq!(recommended_dpi(None, 1.5, physical), 144);
+        assert_eq!(recommended_dpi(None, 0.5, physical), 96);
+        assert_eq!(recommended_dpi(None, 8.0, physical), 480);
+    }
+
+    #[test]
+    fn dpi_on_gnome_follows_how_mutter_scales_xwayland() {
+        // mutter already upscales X11 apps; a higher DPI would double it.
+        assert_eq!(
+            recommended_dpi(Some((3840, 2400)), 2.0, XScaling::Upscaled),
+            96
+        );
+        // Native scaling hands Wine a 2x canvas at 125%.
+        assert_eq!(
+            recommended_dpi(Some((2560, 1600)), 1.25, XScaling::RoundedUp),
+            192
+        );
+        assert_eq!(recommended_dpi(None, 1.0, XScaling::RoundedUp), 96);
+        assert_eq!(recommended_dpi(None, 2.5, XScaling::RoundedUp), 288);
+    }
+
+    #[test]
+    fn reads_mutter_experimental_features() {
+        assert!(has_native_xwayland_scaling(
+            "['scale-monitor-framebuffer', 'xwayland-native-scaling']"
+        ));
+        assert!(!has_native_xwayland_scaling(
+            "['scale-monitor-framebuffer']"
+        ));
+        assert!(!has_native_xwayland_scaling("@as []"));
     }
 
     #[test]

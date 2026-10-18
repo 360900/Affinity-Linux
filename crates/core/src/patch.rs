@@ -11,6 +11,7 @@ use crate::deps::which;
 use crate::http;
 use crate::journal::Report;
 use crate::runner::{self, RunOptions, Stream};
+use crate::seven_zip_out;
 
 const PATCHER_CS: &str = "https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/Patch/AffinityPatcherSettings/AffinityPatcher.cs";
 const PATCHER_CSPROJ: &str = "https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/Patch/AffinityPatcherSettings/AffinityPatcher.csproj";
@@ -212,7 +213,7 @@ fn ensure_return_colors(prefix: &Path, dry_run: bool, report: &mut Report<'_>) -
     let _ = fs::remove_dir_all(&temp);
     fs::create_dir_all(&temp)?;
     let mut cmd = Command::new("7z");
-    cmd.args(["x", "-y", "-o"]).arg(&temp).arg(&zip);
+    cmd.args(["x", "-y"]).arg(seven_zip_out(&temp)).arg(&zip);
     let _ = runner::run(
         cmd,
         RunOptions::default().stall(Duration::from_secs(300)),

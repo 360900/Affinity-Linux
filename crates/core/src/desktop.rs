@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::WINE_DIR_NAME;
 use crate::deps::which;
 use crate::journal::Report;
 use crate::runner::{self, RunOptions, Stream};
+use crate::{APP_NAME, WINE_DIR_NAME};
 
 pub const URL_HANDLER_FILE: &str = "affinity-url-handler.desktop";
 
@@ -92,7 +92,34 @@ fn desktop_contents(prefix: &Path, exec: &str) -> String {
     )
 }
 
+/// Starts Affinity through our own launcher, so menu launches get the same
+/// environment (DLL overrides, GPU selection, guards) as the Launch button.
+/// Falls back to plain Wine when the launcher binary cannot be found.
 fn exec_line(prefix: &Path) -> String {
+    match launcher() {
+        Some(cli) => launcher_exec(&cli, prefix),
+        None => wine_exec_line(prefix),
+    }
+}
+
+fn launcher() -> Option<PathBuf> {
+    // AppRun forwards any arguments to the CLI.
+    if let Some(appimage) = std::env::var_os("APPIMAGE") {
+        return Some(PathBuf::from(appimage));
+    }
+    let cli = std::env::current_exe().ok()?.with_file_name(APP_NAME);
+    cli.is_file().then_some(cli)
+}
+
+fn launcher_exec(cli: &Path, prefix: &Path) -> String {
+    format!(
+        "{} launch --prefix {}",
+        quote(&cli.display().to_string()),
+        quote(&prefix.display().to_string())
+    )
+}
+
+fn wine_exec_line(prefix: &Path) -> String {
     let wine = prefix.join(WINE_DIR_NAME).join("bin/wine");
     let app_dir = prefix.join("drive_c/Program Files/Affinity/Affinity");
     let hook = app_dir.join("AffinityHook.exe");
@@ -306,8 +333,20 @@ mod tests {
         let mut lines = Vec::new();
         create(&options, |_, line| lines.push(line.to_string())).unwrap();
         let text = lines.join("\n");
-        assert!(text.contains("Exec=env WINEPREFIX="));
+        assert!(text.contains("Exec="));
         assert!(text.contains("HKEY_CLASSES_ROOT\\affinity"));
         assert!(!dir.path().join("Affinity.desktop").exists());
+    }
+
+    #[test]
+    fn exec_goes_through_the_launcher() {
+        let exec = launcher_exec(
+            Path::new("/usr/bin/affinity-linux"),
+            Path::new("/home/me/My Prefix"),
+        );
+        assert_eq!(
+            exec,
+            "/usr/bin/affinity-linux launch --prefix \"/home/me/My Prefix\""
+        );
     }
 }

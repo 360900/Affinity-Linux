@@ -11,7 +11,7 @@ path = "src/main.rs"
 [dependencies]
 affinity-linux-core = { path = "../core" }
 anyhow.workspace = true
-slint.workspace = true
+slint = { workspace = true, features = ["unstable-winit-030"] }
 
 [build-dependencies]
 slint-build.workspace = true

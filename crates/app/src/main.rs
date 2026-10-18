@@ -1,6 +1,7 @@
 slint::include_modules!();
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -21,6 +22,7 @@ use affinity_linux_core::packages::{self, Elevation, PlanRunOptions};
 use affinity_linux_core::runner::Stream;
 use affinity_linux_core::uninstall;
 use affinity_linux_core::wine;
+use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, LogicalSize, Model, VecModel};
 
 enum UiEvent {
@@ -65,8 +67,9 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
             let (backend, opencl) = selected_options(&ui);
+            let display = display_info(&ui);
             start_job(&ui, "Installing…");
-            spawn_install(cfg, backend, opencl, tx.clone());
+            spawn_install(cfg, backend, opencl, display, tx.clone());
         });
     }
     {
@@ -105,8 +108,9 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
             let (backend, opencl) = selected_options(&ui);
+            let display = display_info(&ui);
             start_job(&ui, "Repairing…");
-            spawn_repair(cfg, backend, opencl, tx.clone());
+            spawn_repair(cfg, backend, opencl, display, tx.clone());
         });
     }
     {
@@ -125,9 +129,14 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let weak = ui.as_weak();
         ui.on_details_toggled(move || {
-            if let Some(ui) = weak.upgrade() {
-                fit_window(&ui);
-            }
+            // Measure on the next turn: the log panel is still in the layout
+            // while this callback runs, so fit-height would be stale.
+            let weak = weak.clone();
+            slint::Timer::single_shot(Duration::ZERO, move || {
+                if let Some(ui) = weak.upgrade() {
+                    fit_window(&ui);
+                }
+            });
         });
     }
 
@@ -200,6 +209,51 @@ fn selected_options(ui: &MainWindow) -> (GpuBackend, bool) {
         GpuBackend::Vkd3d
     };
     (backend, ui.get_opencl_enabled())
+}
+
+/// The monitor's physical resolution, if known, and the window's scale factor.
+/// The scale comes from Slint: on Wayland, winit's monitor scale is the
+/// integer wl_output scale, while the window gets the real fractional one.
+#[derive(Debug, Clone, Copy)]
+struct DisplayInfo {
+    resolution: Option<(u32, u32)>,
+    scale: f32,
+}
+
+fn display_info(ui: &MainWindow) -> DisplayInfo {
+    let window = ui.window();
+    let resolution = window
+        .with_winit_window(|winit| {
+            winit.current_monitor().map(|monitor| {
+                let size = monitor.size();
+                (size.width, size.height)
+            })
+        })
+        .flatten();
+    DisplayInfo {
+        resolution,
+        scale: window.scale_factor(),
+    }
+}
+
+/// Picks the Wine DPI for the display and logs how it was chosen.
+fn display_dpi(display: DisplayInfo, tx: &Sender<UiEvent>, log_path: &Path) -> u32 {
+    let x = wine::detect_x_scaling();
+    let dpi = wine::recommended_dpi(display.resolution, display.scale, x);
+    let resolution = display
+        .resolution
+        .map(|(width, height)| format!("{width}x{height}"))
+        .unwrap_or_else(|| "unknown resolution".into());
+    job_info(
+        tx,
+        log_path,
+        format!(
+            "display: {resolution} at {:.2}x scale ({}), using Wine DPI {dpi}",
+            display.scale,
+            x.label()
+        ),
+    );
+    dpi
 }
 
 fn start_job(ui: &MainWindow, state: &str) {
@@ -296,13 +350,20 @@ fn spawn_doctor(cfg: Config, tx: Sender<UiEvent>) {
     });
 }
 
-fn spawn_install(cfg: Config, backend: GpuBackend, opencl: bool, tx: Sender<UiEvent>) {
-    std::thread::spawn(move || match install_all(&cfg, backend, opencl, &tx) {
-        Ok(()) => {
-            let _ = tx.send(UiEvent::JobDone("install"));
-        }
-        Err(error) => {
-            let _ = tx.send(UiEvent::JobFailed("install", format!("{error:#}")));
+fn spawn_install(
+    cfg: Config,
+    backend: GpuBackend,
+    opencl: bool,
+    display: DisplayInfo,
+    tx: Sender<UiEvent>,
+) {
+    std::thread::spawn(move || {
+        let log_path = job_log(&cfg.prefix, "install");
+        match install_all(&cfg, backend, opencl, display, &log_path, &tx) {
+            Ok(()) => {
+                let _ = tx.send(UiEvent::JobDone("install"));
+            }
+            Err(error) => job_failed(&tx, "install", &log_path, &error),
         }
     });
 }
@@ -311,14 +372,14 @@ fn install_all(
     cfg: &Config,
     backend: GpuBackend,
     opencl: bool,
+    display: DisplayInfo,
+    log_path: &Path,
     tx: &Sender<UiEvent>,
 ) -> anyhow::Result<()> {
-    let os = OsRelease::detect()?;
     let prefix = cfg.prefix.clone();
-    fs::create_dir_all(&prefix)?;
-    let log_dir = prefix.join("logs");
-    fs::create_dir_all(&log_dir)?;
-    let log_path = log_dir.join(format!("install-{}.log", now_epoch()));
+    fs::create_dir_all(prefix.join("logs"))?;
+    let log_path = log_path.to_path_buf();
+    let os = OsRelease::detect()?;
     let mut send = |stream: Stream, line: &str| {
         let _ = tx.send(UiEvent::Log(
             line.to_string(),
@@ -331,7 +392,9 @@ fn install_all(
     if !missing.is_empty() {
         let plan = packages::plan(&os);
         if plan.steps.is_empty() {
-            let _ = tx.send(UiEvent::Log(
+            job_warn(
+                tx,
+                &log_path,
                 format!(
                     "warning: no automatic dependency plan; missing: {}",
                     missing
@@ -340,8 +403,7 @@ fn install_all(
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-                true,
-            ));
+            );
         } else {
             let elevation = if packages::is_root() {
                 Elevation::None
@@ -374,16 +436,17 @@ fn install_all(
         }
     }
 
+    let dpi = display_dpi(display, tx, &log_path);
+
     let setup = wine::SetupOptions {
         prefix: prefix.clone(),
         family: os.family(),
         dry_run: false,
         log_path: Some(log_path.clone()),
         wine_version: None,
+        dpi: Some(dpi),
     };
     wine::setup(&setup, &mut send)?;
-
-    ensure_installed(&prefix)?;
 
     let backend_options = backends::BackendOptions {
         prefix: prefix.clone(),
@@ -393,10 +456,11 @@ fn install_all(
         log_path: Some(log_path.clone()),
     };
     if let Err(error) = backends::install(&backend_options, &mut send) {
-        let _ = tx.send(UiEvent::Log(
+        job_warn(
+            tx,
+            &log_path,
             format!("warning: GPU backend setup failed: {error:#}"),
-            true,
-        ));
+        );
     }
 
     let install_options = install::InstallOptions {
@@ -431,11 +495,9 @@ fn ensure_installed(prefix: &Path) -> anyhow::Result<()> {
 fn spawn_update(cfg: Config, tx: Sender<UiEvent>) {
     std::thread::spawn(move || {
         let prefix = cfg.prefix.clone();
+        let log_path = job_log(&prefix, "update");
         let result = (|| -> anyhow::Result<()> {
             ensure_installed(&prefix)?;
-            let log_path = prefix
-                .join("logs")
-                .join(format!("update-{}.log", now_epoch()));
             if let Some(parent) = log_path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -449,7 +511,7 @@ fn spawn_update(cfg: Config, tx: Sender<UiEvent>) {
                 prefix,
                 installer: None,
                 dry_run: false,
-                log_path: Some(log_path),
+                log_path: Some(log_path.clone()),
             };
             install::install(&options, &mut send)?;
             Ok(())
@@ -458,21 +520,23 @@ fn spawn_update(cfg: Config, tx: Sender<UiEvent>) {
             Ok(()) => {
                 let _ = tx.send(UiEvent::JobDone("update"));
             }
-            Err(error) => {
-                let _ = tx.send(UiEvent::JobFailed("update", format!("{error:#}")));
-            }
+            Err(error) => job_failed(&tx, "update", &log_path, &error),
         }
     });
 }
 
-fn spawn_repair(cfg: Config, backend: GpuBackend, opencl: bool, tx: Sender<UiEvent>) {
+fn spawn_repair(
+    cfg: Config,
+    backend: GpuBackend,
+    opencl: bool,
+    display: DisplayInfo,
+    tx: Sender<UiEvent>,
+) {
     std::thread::spawn(move || {
         let prefix = cfg.prefix.clone();
+        let log_path = job_log(&prefix, "repair");
         let result = (|| -> anyhow::Result<()> {
             ensure_installed(&prefix)?;
-            let log_path = prefix
-                .join("logs")
-                .join(format!("repair-{}.log", now_epoch()));
             if let Some(parent) = log_path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -482,6 +546,16 @@ fn spawn_repair(cfg: Config, backend: GpuBackend, opencl: bool, tx: Sender<UiEve
                     matches!(stream, Stream::Stderr),
                 ));
             };
+            let dpi = display_dpi(display, &tx, &log_path);
+            if let Err(error) =
+                wine::apply_dpi(&prefix, dpi, false, Some(log_path.clone()), &mut send)
+            {
+                job_warn(
+                    &tx,
+                    &log_path,
+                    format!("warning: could not set the Wine DPI: {error:#}"),
+                );
+            }
             let backend_options = backends::BackendOptions {
                 prefix: prefix.clone(),
                 backend,
@@ -490,16 +564,17 @@ fn spawn_repair(cfg: Config, backend: GpuBackend, opencl: bool, tx: Sender<UiEve
                 log_path: Some(log_path.clone()),
             };
             if let Err(error) = backends::install(&backend_options, &mut send) {
-                let _ = tx.send(UiEvent::Log(
+                job_warn(
+                    &tx,
+                    &log_path,
                     format!("warning: GPU backend setup failed: {error:#}"),
-                    true,
-                ));
+                );
             }
             let options = install::InstallOptions {
                 prefix,
                 installer: None,
                 dry_run: false,
-                log_path: Some(log_path),
+                log_path: Some(log_path.clone()),
             };
             install::repair(&options, &mut send)?;
             let mut saved = cfg.clone();
@@ -512,9 +587,7 @@ fn spawn_repair(cfg: Config, backend: GpuBackend, opencl: bool, tx: Sender<UiEve
             Ok(()) => {
                 let _ = tx.send(UiEvent::JobDone("repair"));
             }
-            Err(error) => {
-                let _ = tx.send(UiEvent::JobFailed("repair", format!("{error:#}")));
-            }
+            Err(error) => job_failed(&tx, "repair", &log_path, &error),
         }
     });
 }
@@ -522,14 +595,13 @@ fn spawn_repair(cfg: Config, backend: GpuBackend, opencl: bool, tx: Sender<UiEve
 fn spawn_launch(cfg: Config, tx: Sender<UiEvent>) {
     std::thread::spawn(move || {
         let prefix = cfg.prefix.clone();
-        let log_path = prefix
-            .join("logs")
-            .join(format!("launch-{}.log", now_epoch()));
+        let log_path = job_log(&prefix, "launch");
         let options = launch::LaunchOptions {
             prefix,
             args: Vec::new(),
             dry_run: false,
-            log_path: Some(log_path),
+            log_path: Some(log_path.clone()),
+            wayland: false,
         };
         let mut send = |stream: Stream, line: &str| {
             let _ = tx.send(UiEvent::Log(
@@ -545,9 +617,7 @@ fn spawn_launch(cfg: Config, tx: Sender<UiEvent>) {
                 ));
                 let _ = tx.send(UiEvent::JobDone("launch"));
             }
-            Err(error) => {
-                let _ = tx.send(UiEvent::JobFailed("launch", format!("{error:#}")));
-            }
+            Err(error) => job_failed(&tx, "launch", &log_path, &error),
         }
     });
 }
@@ -555,13 +625,11 @@ fn spawn_launch(cfg: Config, tx: Sender<UiEvent>) {
 fn spawn_uninstall(cfg: Config, tx: Sender<UiEvent>) {
     std::thread::spawn(move || {
         let prefix = cfg.prefix.clone();
-        let log_path = prefix
-            .join("logs")
-            .join(format!("uninstall-{}.log", now_epoch()));
+        let log_path = job_log(&prefix, "uninstall");
         let options = uninstall::UninstallOptions {
             prefix,
             dry_run: false,
-            log_path: Some(log_path),
+            log_path: Some(log_path.clone()),
         };
         let mut send = |stream: Stream, line: &str| {
             let _ = tx.send(UiEvent::Log(
@@ -585,11 +653,42 @@ fn spawn_uninstall(cfg: Config, tx: Sender<UiEvent>) {
                 ));
                 let _ = tx.send(UiEvent::JobDone("uninstall"));
             }
-            Err(error) => {
-                let _ = tx.send(UiEvent::JobFailed("uninstall", format!("{error:#}")));
-            }
+            Err(error) => job_failed(&tx, "uninstall", &log_path, &error),
         }
     });
+}
+
+fn job_log(prefix: &Path, kind: &str) -> PathBuf {
+    prefix
+        .join("logs")
+        .join(format!("{kind}-{}.log", now_epoch()))
+}
+
+/// Appends a line the core never saw to the job log. Skipped when the log
+/// directory does not exist, e.g. after an uninstall removed the prefix.
+fn append_log(path: &Path, text: &str) {
+    if !path.parent().is_some_and(Path::is_dir) {
+        return;
+    }
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{text}");
+    }
+}
+
+fn job_info(tx: &Sender<UiEvent>, log_path: &Path, text: String) {
+    append_log(log_path, &text);
+    let _ = tx.send(UiEvent::Log(text, false));
+}
+
+fn job_warn(tx: &Sender<UiEvent>, log_path: &Path, text: String) {
+    append_log(log_path, &text);
+    let _ = tx.send(UiEvent::Log(text, true));
+}
+
+fn job_failed(tx: &Sender<UiEvent>, kind: &'static str, log_path: &Path, error: &anyhow::Error) {
+    let message = format!("{error:#}");
+    append_log(log_path, &format!("error: {message}"));
+    let _ = tx.send(UiEvent::JobFailed(kind, message));
 }
 
 fn apply_report(
@@ -734,6 +833,9 @@ mod tests {
         gpu_label(&gpu::Gpu {
             vendor,
             name: name.to_string(),
+            slot: String::new(),
+            pci_id: None,
+            discrete: false,
         })
     }
 

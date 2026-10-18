@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::backends;
 use crate::config;
-use crate::gpu::{self, Vendor};
+use crate::gpu::{self, Gpu, Vendor};
 use crate::journal::Report;
 use crate::manifest::now_epoch;
 use crate::runner::{self, RunOptions, Stream};
@@ -23,6 +23,8 @@ pub struct LaunchOptions {
     pub args: Vec<String>,
     pub dry_run: bool,
     pub log_path: Option<PathBuf>,
+    /// Experimental: use Wine's native Wayland driver instead of XWayland.
+    pub wayland: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -68,8 +70,26 @@ where
         report.info("synced the vkd3d-proton runtime next to Affinity");
     }
 
-    let envs = launch_env(&opts.prefix, &wine_dir);
-    force_x11_if_wayland(&mut report, &wine, &envs, opts.dry_run)?;
+    let gpus = gpu::detect();
+    let selection =
+        config::read_prefix_state(&opts.prefix, ".gpu_config").unwrap_or_else(|| "auto".into());
+    let chosen = select_gpu(&gpus, &selection);
+    if let Some(gpu) = chosen {
+        report.info(format!("rendering on {} ({})", gpu.name, gpu.slot));
+    }
+    let nvidia = gpus.iter().any(|gpu| gpu.vendor == Vendor::Nvidia);
+    let envs = launch_env(&opts.prefix, &wine_dir, chosen, nvidia);
+    if wayland_session() {
+        let driver = if opts.wayland {
+            report.warn("using Wine's experimental Wayland driver");
+            "wayland"
+        } else {
+            "x11"
+        };
+        set_graphics_driver(&mut report, &wine, &envs, driver, opts.dry_run)?;
+    } else if opts.wayland {
+        report.warn("not a Wayland session; ignoring --wayland");
+    }
 
     let target = backends::launch_target(&opts.prefix);
     let mut cmd = Command::new(&wine);
@@ -158,15 +178,15 @@ fn user_data_dir(prefix: &Path) -> PathBuf {
         .join("AppData/Roaming/Affinity/Affinity/3.0")
 }
 
-fn force_x11_if_wayland(
+/// Pins Wine's graphics driver in the prefix. Written on every Wayland
+/// launch, so a normal launch after `--wayland` goes back to X11.
+fn set_graphics_driver(
     report: &mut Report<'_>,
     wine: &Path,
     envs: &[(String, String)],
+    driver: &str,
     dry_run: bool,
 ) -> Result<()> {
-    if !wayland_session() {
-        return Ok(());
-    }
     let mut cmd = Command::new(wine);
     cmd.args([
         "reg",
@@ -177,12 +197,12 @@ fn force_x11_if_wayland(
         "/t",
         "REG_SZ",
         "/d",
-        "x11",
+        driver,
         "/f",
     ]);
     if dry_run {
         report.info(format!(
-            "{} (Wayland session: forcing the Wine X11 driver)",
+            "{} (Wayland session: using the Wine {driver} driver)",
             describe(&cmd)
         ));
         return Ok(());
@@ -194,15 +214,20 @@ fn force_x11_if_wayland(
     match runner::run(cmd, run_opts, |stream, line| report.line(stream, line)) {
         Ok(result) if result.success() => {}
         Ok(result) => report.warn(format!(
-            "could not force the Wine X11 driver (exit {})",
+            "could not set the Wine {driver} driver (exit {})",
             result.status
         )),
-        Err(error) => report.warn(format!("could not force the Wine X11 driver: {error}")),
+        Err(error) => report.warn(format!("could not set the Wine {driver} driver: {error}")),
     }
     Ok(())
 }
 
-fn launch_env(prefix: &Path, wine_dir: &Path) -> Vec<(String, String)> {
+fn launch_env(
+    prefix: &Path,
+    wine_dir: &Path,
+    gpu: Option<&Gpu>,
+    nvidia: bool,
+) -> Vec<(String, String)> {
     let mut envs = Vec::new();
     let path = std::env::var("PATH").unwrap_or_default();
     envs.push(("WINEPREFIX".into(), prefix.display().to_string()));
@@ -236,99 +261,49 @@ fn launch_env(prefix: &Path, wine_dir: &Path) -> Vec<(String, String)> {
     }
     envs.push(("WINEDLLOVERRIDES".into(), overrides.join(";")));
 
-    let selection =
-        config::read_prefix_state(prefix, ".gpu_config").unwrap_or_else(|| "auto".into());
-    envs.extend(gpu_env(&selection));
-    if let Some((device, value)) = vulkan_device_select(&selection) {
-        envs.push((device, value));
+    if let Some(gpu) = gpu {
+        envs.extend(gpu_env(gpu));
     }
 
-    for (key, value) in vulkan_runtime_env(wayland_session(), has_nvidia()) {
+    for (key, value) in vulkan_runtime_env(wayland_session(), nvidia) {
         envs.push((key.to_string(), value.to_string()));
     }
 
     envs
 }
 
-fn gpu_env(selection: &str) -> Vec<(String, String)> {
+/// Resolves `.gpu_config`: "auto" picks the discrete GPU on multi-GPU systems,
+/// "<vendor>_<n>" picks the n-th GPU of that vendor.
+fn select_gpu<'a>(gpus: &'a [Gpu], selection: &str) -> Option<&'a Gpu> {
     if selection.is_empty() || selection == "auto" {
-        return Vec::new();
+        return gpu::preferred(gpus);
     }
-    if selection.starts_with("nvidia_") {
-        return vec![
+    let (kind, raw_index) = selection.split_once('_')?;
+    let vendor = match kind {
+        "nvidia" => Vendor::Nvidia,
+        "amd" => Vendor::Amd,
+        "intel" => Vendor::Intel,
+        _ => return None,
+    };
+    let matching: Vec<&Gpu> = gpus.iter().filter(|gpu| gpu.vendor == vendor).collect();
+    let wanted: usize = raw_index.parse().unwrap_or(0);
+    matching.get(wanted).or_else(|| matching.first()).copied()
+}
+
+fn gpu_env(gpu: &Gpu) -> Vec<(String, String)> {
+    let mut envs: Vec<(String, String)> = if gpu.vendor == Vendor::Nvidia {
+        vec![
             ("__NV_PRIME_RENDER_OFFLOAD".into(), "1".into()),
             ("__GLX_VENDOR_LIBRARY_NAME".into(), "nvidia".into()),
             ("__VK_LAYER_NV_optimus".into(), "NVIDIA_only".into()),
-        ];
-    }
-    if let Some(index) = selection.strip_prefix("amd_") {
-        return vec![("DRI_PRIME".into(), index.to_string())];
-    }
-    if selection.starts_with("intel_") {
-        return vec![("DRI_PRIME".into(), "0".into())];
-    }
-    Vec::new()
-}
-
-fn vulkan_device_select(selection: &str) -> Option<(String, String)> {
-    let (kind, raw_index) = selection.split_once('_')?;
-    if !matches!(kind, "nvidia" | "amd" | "intel") {
-        return None;
-    }
-    let wanted: usize = raw_index.parse().ok()?;
-    let output = Command::new("lspci").arg("-nn").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut lines: Vec<&str> = text
-        .lines()
-        .filter(|line| {
-            let lower = line.to_ascii_lowercase();
-            (lower.contains("vga")
-                || lower.contains("3d controller")
-                || lower.contains("display controller"))
-                && match kind {
-                    "nvidia" => lower.contains("nvidia"),
-                    "amd" => {
-                        lower.contains("amd")
-                            || lower.contains("radeon")
-                            || lower.contains("advanced micro devices")
-                    }
-                    "intel" => lower.contains("intel"),
-                    _ => false,
-                }
-        })
-        .collect();
-    if lines.is_empty() {
-        return None;
-    }
-    if wanted >= lines.len() {
-        lines.truncate(1);
-    }
-    let line = lines.get(wanted).or_else(|| lines.first())?;
-    let id = pci_id(line)?;
-    Some(("MESA_VK_DEVICE_SELECT".into(), id))
-}
-
-fn pci_id(line: &str) -> Option<String> {
-    let start = line.rfind('[')?;
-    let end = line[start..].find(']')? + start;
-    let inner = &line[start + 1..end];
-    let (vendor, device) = inner.split_once(':')?;
-    if vendor.len() == 4
-        && device.len() == 4
-        && vendor.chars().all(|c| c.is_ascii_hexdigit())
-        && device.chars().all(|c| c.is_ascii_hexdigit())
-    {
-        Some(format!(
-            "{}:{}",
-            vendor.to_ascii_lowercase(),
-            device.to_ascii_lowercase()
-        ))
+        ]
     } else {
-        None
+        vec![("DRI_PRIME".into(), gpu.dri_prime_tag())]
+    };
+    if let Some(id) = &gpu.pci_id {
+        envs.push(("MESA_VK_DEVICE_SELECT".into(), id.clone()));
     }
+    envs
 }
 
 fn vulkan_runtime_env(wayland: bool, nvidia: bool) -> Vec<(&'static str, &'static str)> {
@@ -358,15 +333,11 @@ fn vulkan_runtime_env(wayland: bool, nvidia: bool) -> Vec<(&'static str, &'stati
     env
 }
 
-fn wayland_session() -> bool {
+pub(crate) fn wayland_session() -> bool {
     std::env::var("XDG_SESSION_TYPE")
         .map(|value| value.eq_ignore_ascii_case("wayland"))
         .unwrap_or(false)
-        || std::env::var_os("WAYLAND_DISPLAY").is_some()
-}
-
-fn has_nvidia() -> bool {
-    gpu::detect().iter().any(|gpu| gpu.vendor == Vendor::Nvidia)
+        || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty())
 }
 
 fn describe(cmd: &Command) -> String {
@@ -396,26 +367,39 @@ mod tests {
         assert!(guard_corruption(prefix).unwrap().is_none());
     }
 
-    #[test]
-    fn gpu_env_for_selected_devices() {
-        let nvidia = gpu_env("nvidia_0");
-        assert!(
-            nvidia
-                .iter()
-                .any(|(key, _)| key == "__NV_PRIME_RENDER_OFFLOAD")
-        );
-        let amd = gpu_env("amd_2");
-        assert_eq!(amd, vec![("DRI_PRIME".into(), "2".into())]);
-        assert!(gpu_env("auto").is_empty());
+    fn hybrid() -> Vec<Gpu> {
+        gpu::parse(
+            "0000:00:02.0 VGA compatible controller [0300]: Intel Corporation Raptor Lake-P [Iris Xe Graphics] [8086:a7a0] (rev 04)\n\
+             0000:01:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD103GLM [RTX 5000 Ada Generation Laptop GPU] [10de:2730] (rev a1)\n\
+             0000:03:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Navi 23 [Radeon RX 6600M] [1002:73ff] (rev c3)\n",
+        )
     }
 
     #[test]
-    fn parses_pci_ids() {
+    fn auto_selects_discrete_gpu() {
+        let gpus = hybrid();
+        let chosen = select_gpu(&gpus, "auto").unwrap();
+        assert_eq!(chosen.vendor, Vendor::Nvidia);
+        let env = gpu_env(chosen);
+        assert!(env.contains(&("__NV_PRIME_RENDER_OFFLOAD".into(), "1".into())));
+        assert!(env.contains(&("MESA_VK_DEVICE_SELECT".into(), "10de:2730".into())));
+
+        assert!(select_gpu(&gpus[..1], "auto").is_none());
+    }
+
+    #[test]
+    fn explicit_selection_overrides_auto() {
+        let gpus = hybrid();
+        let amd = select_gpu(&gpus, "amd_0").unwrap();
         assert_eq!(
-            pci_id("01:00.0 VGA compatible controller: NVIDIA [10de:2484] (rev a1)"),
-            Some("10de:2484".into())
+            gpu_env(amd),
+            vec![
+                ("DRI_PRIME".into(), "pci-0000_03_00_0".into()),
+                ("MESA_VK_DEVICE_SELECT".into(), "1002:73ff".into()),
+            ]
         );
-        assert_eq!(pci_id("no id here"), None);
+        assert_eq!(select_gpu(&gpus, "intel_0").unwrap().slot, "0000:00:02.0");
+        assert!(select_gpu(&gpus, "bogus").is_none());
     }
 
     #[test]
@@ -450,6 +434,7 @@ mod tests {
             args: vec!["--help".into()],
             dry_run: true,
             log_path: None,
+            wayland: false,
         };
         let mut lines = Vec::new();
         let outcome = launch(&opts, |_, line| lines.push(line.to_string())).unwrap();

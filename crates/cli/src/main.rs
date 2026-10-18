@@ -98,6 +98,9 @@ enum Command {
         /// Enable OpenCL: true or false
         #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
         opencl: Option<bool>,
+        /// Wine DPI to set, 96 = 100% (default: leave unchanged)
+        #[arg(long, value_parser = clap::value_parser!(u32).range(96..=480))]
+        dpi: Option<u32>,
     },
     /// Reinstall the latest Affinity build and re-apply post-install fixes
     Update {
@@ -125,12 +128,21 @@ enum Command {
         /// Prefix override
         #[arg(long)]
         prefix: Option<PathBuf>,
+        /// Wine DPI to set, 96 = 100% (default: leave unchanged)
+        #[arg(long, value_parser = clap::value_parser!(u32).range(96..=480))]
+        dpi: Option<u32>,
     },
     /// Launch Affinity with the correct Wine environment
     Launch {
         /// Print the environment without starting Affinity
         #[arg(long)]
         dry_run: bool,
+        /// Prefix override; does not change the saved config
+        #[arg(long)]
+        prefix: Option<PathBuf>,
+        /// Experimental: use Wine's Wayland driver instead of XWayland
+        #[arg(long)]
+        wayland: bool,
         /// Extra arguments forwarded to the Affinity executable
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -180,8 +192,9 @@ fn main() -> Result<()> {
             skip_wine,
             gpu,
             opencl,
+            dpi,
         } => run_install(
-            &cfg, dry_run, yes, prefix, installer, skip_deps, skip_wine, gpu, opencl,
+            &cfg, dry_run, yes, prefix, installer, skip_deps, skip_wine, gpu, opencl, dpi,
         ),
         Command::Update {
             dry_run,
@@ -193,8 +206,14 @@ fn main() -> Result<()> {
             dry_run,
             yes,
             prefix,
-        } => run_repair(&cfg, dry_run, yes, prefix),
-        Command::Launch { dry_run, args } => run_launch(&cfg, dry_run, args),
+            dpi,
+        } => run_repair(&cfg, dry_run, yes, prefix, dpi),
+        Command::Launch {
+            dry_run,
+            prefix,
+            wayland,
+            args,
+        } => run_launch(&cfg, dry_run, prefix, wayland, args),
         Command::Uninstall { yes, dry_run } => run_uninstall(&cfg, yes, dry_run),
     }
 }
@@ -338,6 +357,7 @@ fn run_wine_setup(
         dry_run,
         log_path,
         wine_version: version,
+        dpi: None,
     };
 
     let report = wine::setup(&options, |stream, line| match stream {
@@ -390,6 +410,7 @@ fn run_install(
     skip_wine: bool,
     gpu: Option<String>,
     opencl: Option<bool>,
+    dpi: Option<u32>,
 ) -> Result<()> {
     let os = OsRelease::detect()?;
     let prefix = prefix.unwrap_or_else(|| cfg.prefix.clone());
@@ -455,6 +476,7 @@ fn run_install(
                 dry_run: true,
                 log_path: None,
                 wine_version: None,
+                dpi,
             };
             wine::setup(&options, print_stream)?;
         }
@@ -561,6 +583,7 @@ fn run_install(
             dry_run: false,
             log_path: Some(log_path.clone()),
             wine_version: None,
+            dpi,
         };
         let setup = wine::setup(&options, print_stream)?;
         if let Some(version) = &setup.wine_version {
@@ -709,7 +732,13 @@ fn run_update(
     Ok(())
 }
 
-fn run_repair(cfg: &Config, dry_run: bool, yes: bool, prefix: Option<PathBuf>) -> Result<()> {
+fn run_repair(
+    cfg: &Config,
+    dry_run: bool,
+    yes: bool,
+    prefix: Option<PathBuf>,
+    dpi: Option<u32>,
+) -> Result<()> {
     let prefix = prefix.unwrap_or_else(|| cfg.prefix.clone());
     println!("repair Affinity v3");
     println!("  prefix    {}", prefix.display());
@@ -731,6 +760,12 @@ fn run_repair(cfg: &Config, dry_run: bool, yes: bool, prefix: Option<PathBuf>) -
         println!("  log       {}", path.display());
         Some(path)
     };
+
+    if let Some(dpi) = dpi
+        && let Err(error) = wine::apply_dpi(&prefix, dpi, dry_run, log_path.clone(), print_stream)
+    {
+        println!("warning: could not set the Wine DPI: {error:#}");
+    }
 
     let backend_options = backends::BackendOptions {
         prefix: prefix.clone(),
@@ -764,8 +799,14 @@ fn run_repair(cfg: &Config, dry_run: bool, yes: bool, prefix: Option<PathBuf>) -
     Ok(())
 }
 
-fn run_launch(cfg: &Config, dry_run: bool, args: Vec<String>) -> Result<()> {
-    let prefix = cfg.prefix.clone();
+fn run_launch(
+    cfg: &Config,
+    dry_run: bool,
+    prefix: Option<PathBuf>,
+    wayland: bool,
+    args: Vec<String>,
+) -> Result<()> {
+    let prefix = prefix.unwrap_or_else(|| cfg.prefix.clone());
     let log_path = if dry_run {
         None
     } else {
@@ -778,6 +819,7 @@ fn run_launch(cfg: &Config, dry_run: bool, args: Vec<String>) -> Result<()> {
         args,
         dry_run,
         log_path,
+        wayland,
     };
     let outcome = launch::launch(&options, print_stream)?;
     println!("target  {}", outcome.target.display());

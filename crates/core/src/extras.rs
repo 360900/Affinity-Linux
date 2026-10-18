@@ -7,12 +7,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::WINE_DIR_NAME;
 use crate::deps::which;
 use crate::http;
 use crate::journal::Report;
 use crate::manifest::now_epoch;
 use crate::runner::{self, RunOptions, RunResult, Stream};
+use crate::{WINE_DIR_NAME, seven_zip_out};
 
 const DOTNET48_URL: &str = "https://download.visualstudio.microsoft.com/download/pr/7afca223-55d2-470a-8edc-6a1739ae3252/abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe";
 const DOTNET48_SHA256: &str = "95889d6de3f2070c07790ad6cf2000d33d9a1bdfc6a381725ab82ab1c314fd53";
@@ -97,8 +97,8 @@ where
     let _ = fs::remove_dir_all(&temp);
     fs::create_dir_all(&temp)?;
     let mut cmd = Command::new("7z");
-    cmd.args(["e", "-y", "-o"])
-        .arg(&temp)
+    cmd.args(["e", "-y"])
+        .arg(seven_zip_out(&temp))
         .arg(&installer)
         .arg(DOTNET48_CAB);
     let _ = run(&mut report, cmd, &[], Duration::from_secs(600))?;
@@ -113,8 +113,8 @@ where
     for (name, _) in FACADES {
         let pattern = format!("msil_{}_b77a5c561934e089_*/*", name.to_ascii_lowercase());
         let mut cmd = Command::new("7z");
-        cmd.args(["e", "-y", "-o"])
-            .arg(&dll_dir)
+        cmd.args(["e", "-y"])
+            .arg(seven_zip_out(&dll_dir))
             .arg(&cab)
             .arg(pattern);
         let _ = run(&mut report, cmd, &[], Duration::from_secs(600))?;
@@ -200,7 +200,7 @@ where
         http::download(&mut report, &url, &zip, Duration::from_secs(300))?;
         let out = temp.join(format!("{name}-extracted"));
         let mut cmd = Command::new("7z");
-        cmd.args(["x", "-y", "-o"]).arg(&out).arg(&zip);
+        cmd.args(["x", "-y"]).arg(seven_zip_out(&out)).arg(&zip);
         let result = run(&mut report, cmd, &[], Duration::from_secs(300))?;
         if !result.success() {
             report.warn(format!("could not extract {name}"));
@@ -272,7 +272,7 @@ where
     let zip = temp.join("settings.zip");
     http::download(&mut report, SETTINGS_ZIP, &zip, Duration::from_secs(300))?;
     let mut cmd = Command::new("7z");
-    cmd.args(["x", "-y", "-o"]).arg(&temp).arg(&zip);
+    cmd.args(["x", "-y"]).arg(seven_zip_out(&temp)).arg(&zip);
     let result = run(&mut report, cmd, &[], Duration::from_secs(300))?;
     if !result.success() {
         let _ = fs::remove_dir_all(&temp);
