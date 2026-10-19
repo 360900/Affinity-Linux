@@ -73,11 +73,11 @@ where
     let gpus = gpu::detect();
     let selection =
         config::read_prefix_state(&opts.prefix, ".gpu_config").unwrap_or_else(|| "auto".into());
-    let chosen = select_gpu(&gpus, &selection);
+    let chosen = gpu::select(&gpus, &selection);
     if let Some(gpu) = chosen {
         report.info(format!("rendering on {} ({})", gpu.name, gpu.slot));
     }
-    let nvidia = gpus.iter().any(|gpu| gpu.vendor == Vendor::Nvidia);
+    let nvidia = gpu::render_gpu(&gpus, &selection).is_some_and(|gpu| gpu.vendor == Vendor::Nvidia);
     let envs = launch_env(&opts.prefix, &wine_dir, chosen, nvidia);
     if wayland_session() {
         let driver = if opts.wayland {
@@ -272,24 +272,6 @@ fn launch_env(
     envs
 }
 
-/// Resolves `.gpu_config`: "auto" picks the discrete GPU on multi-GPU systems,
-/// "<vendor>_<n>" picks the n-th GPU of that vendor.
-fn select_gpu<'a>(gpus: &'a [Gpu], selection: &str) -> Option<&'a Gpu> {
-    if selection.is_empty() || selection == "auto" {
-        return gpu::preferred(gpus);
-    }
-    let (kind, raw_index) = selection.split_once('_')?;
-    let vendor = match kind {
-        "nvidia" => Vendor::Nvidia,
-        "amd" => Vendor::Amd,
-        "intel" => Vendor::Intel,
-        _ => return None,
-    };
-    let matching: Vec<&Gpu> = gpus.iter().filter(|gpu| gpu.vendor == vendor).collect();
-    let wanted: usize = raw_index.parse().unwrap_or(0);
-    matching.get(wanted).or_else(|| matching.first()).copied()
-}
-
 fn gpu_env(gpu: &Gpu) -> Vec<(String, String)> {
     let mut envs: Vec<(String, String)> = if gpu.vendor == Vendor::Nvidia {
         vec![
@@ -378,19 +360,19 @@ mod tests {
     #[test]
     fn auto_selects_discrete_gpu() {
         let gpus = hybrid();
-        let chosen = select_gpu(&gpus, "auto").unwrap();
+        let chosen = gpu::select(&gpus, "auto").unwrap();
         assert_eq!(chosen.vendor, Vendor::Nvidia);
         let env = gpu_env(chosen);
         assert!(env.contains(&("__NV_PRIME_RENDER_OFFLOAD".into(), "1".into())));
         assert!(env.contains(&("MESA_VK_DEVICE_SELECT".into(), "10de:2730".into())));
 
-        assert!(select_gpu(&gpus[..1], "auto").is_none());
+        assert!(gpu::select(&gpus[..1], "auto").is_none());
     }
 
     #[test]
     fn explicit_selection_overrides_auto() {
         let gpus = hybrid();
-        let amd = select_gpu(&gpus, "amd_0").unwrap();
+        let amd = gpu::select(&gpus, "amd_0").unwrap();
         assert_eq!(
             gpu_env(amd),
             vec![
@@ -398,8 +380,8 @@ mod tests {
                 ("MESA_VK_DEVICE_SELECT".into(), "1002:73ff".into()),
             ]
         );
-        assert_eq!(select_gpu(&gpus, "intel_0").unwrap().slot, "0000:00:02.0");
-        assert!(select_gpu(&gpus, "bogus").is_none());
+        assert_eq!(gpu::select(&gpus, "intel_0").unwrap().slot, "0000:00:02.0");
+        assert!(gpu::select(&gpus, "bogus").is_none());
     }
 
     #[test]

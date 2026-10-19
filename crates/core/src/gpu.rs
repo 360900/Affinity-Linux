@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 
 use serde::Serialize;
@@ -95,6 +96,36 @@ pub fn preferred(gpus: &[Gpu]) -> Option<&Gpu> {
         return None;
     }
     gpus.iter().find(|gpu| gpu.discrete)
+}
+
+/// Resolves `.gpu_config`: "auto" picks the discrete GPU on multi-GPU systems,
+/// "<vendor>_<n>" picks the n-th GPU of that vendor.
+pub fn select<'a>(gpus: &'a [Gpu], selection: &str) -> Option<&'a Gpu> {
+    if selection.is_empty() || selection == "auto" {
+        return preferred(gpus);
+    }
+    let (kind, raw_index) = selection.split_once('_')?;
+    let vendor = match kind {
+        "nvidia" => Vendor::Nvidia,
+        "amd" => Vendor::Amd,
+        "intel" => Vendor::Intel,
+        _ => return None,
+    };
+    let matching: Vec<&Gpu> = gpus.iter().filter(|gpu| gpu.vendor == vendor).collect();
+    let wanted: usize = raw_index.parse().unwrap_or(0);
+    matching.get(wanted).or_else(|| matching.first()).copied()
+}
+
+/// The GPU Affinity renders on: the selected one, else the first one.
+pub fn render_gpu<'a>(gpus: &'a [Gpu], selection: &str) -> Option<&'a Gpu> {
+    select(gpus, selection).or_else(|| gpus.first())
+}
+
+/// Vendor of the GPU Affinity renders on, using the prefix's `.gpu_config`.
+pub fn render_vendor(prefix: &Path) -> Option<Vendor> {
+    let selection =
+        crate::config::read_prefix_state(prefix, ".gpu_config").unwrap_or_else(|| "auto".into());
+    render_gpu(&detect(), &selection).map(|gpu| gpu.vendor)
 }
 
 fn is_discrete(vendor: Vendor, name: &str, slot: &str) -> bool {
@@ -245,6 +276,27 @@ mod tests {
         assert_eq!(preferred(&arc).unwrap().slot, "0000:03:00.0");
 
         assert!(preferred(&laptop[1..]).is_none());
+    }
+
+    #[test]
+    fn render_gpu_is_the_discrete_or_only_gpu() {
+        let apu_and_nvidia = parse(
+            "0000:01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GA107M [GeForce RTX 3050 Mobile] [10de:25a2] (rev a1)\n\
+             0000:05:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Rembrandt [Radeon 680M] [1002:1681] (rev c8)\n",
+        );
+        assert_eq!(
+            render_gpu(&apu_and_nvidia, "auto").unwrap().vendor,
+            Vendor::Nvidia
+        );
+        assert_eq!(
+            render_gpu(&apu_and_nvidia, "amd_0").unwrap().vendor,
+            Vendor::Amd
+        );
+        assert_eq!(
+            render_gpu(&apu_and_nvidia[1..], "auto").unwrap().vendor,
+            Vendor::Amd
+        );
+        assert!(render_gpu(&[], "auto").is_none());
     }
 
     #[test]

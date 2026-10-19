@@ -12,6 +12,10 @@ use crate::manifest::{
 use crate::runner::Stream;
 use crate::{app_exe, desktop, extras, installer, patch};
 
+/// Steps run inside `install`/`repair` stream through this module's report,
+/// which already writes the log; giving them the path too doubled every line.
+const CHILD_LOG: Option<PathBuf> = None;
+
 #[derive(Debug, Clone)]
 pub struct InstallOptions {
     pub prefix: PathBuf,
@@ -22,7 +26,7 @@ pub struct InstallOptions {
 
 #[derive(Debug, Clone, Default)]
 pub struct InstallReport {
-    pub used_msi_fallback: bool,
+    pub used_setup_ui: bool,
     pub facades: bool,
     pub patched: bool,
     pub pluginloader: bool,
@@ -47,11 +51,11 @@ where
             prefix: opts.prefix.clone(),
             installer: opts.installer.clone(),
             dry_run: opts.dry_run,
-            log_path: opts.log_path.clone(),
+            log_path: CHILD_LOG,
         },
         |stream, line| report.line(stream, line),
     )?;
-    outcome.used_msi_fallback = setup.used_msi_fallback;
+    outcome.used_setup_ui = setup.used_setup_ui;
     mark(opts, STEP_INSTALLER, StepStatus::Done, None);
 
     run_extras(opts, &mut report, &mut outcome)?;
@@ -79,21 +83,15 @@ fn run_extras(
     report: &mut Report<'_>,
     outcome: &mut InstallReport,
 ) -> Result<()> {
-    let facades = extras::install_facades(
-        &opts.prefix,
-        opts.dry_run,
-        opts.log_path.clone(),
-        |stream, line| report.line(stream, line),
-    );
+    let facades = extras::install_facades(&opts.prefix, opts.dry_run, CHILD_LOG, |stream, line| {
+        report.line(stream, line)
+    });
     outcome.facades = record(report, outcome, STEP_FACADES, facades, opts);
 
     if opts.dry_run || app_exe(&opts.prefix).exists() {
-        let patched = patch::apply(
-            &opts.prefix,
-            opts.dry_run,
-            opts.log_path.clone(),
-            |stream, line| report.line(stream, line),
-        );
+        let patched = patch::apply(&opts.prefix, opts.dry_run, CHILD_LOG, |stream, line| {
+            report.line(stream, line)
+        });
         match patched {
             Ok(result) => {
                 outcome.patched = result.patched;
@@ -117,19 +115,17 @@ fn run_extras(
         }
     }
 
-    let loader = extras::install_plugin_loader(
-        &opts.prefix,
-        opts.dry_run,
-        opts.log_path.clone(),
-        |stream, line| report.line(stream, line),
-    );
+    let loader =
+        extras::install_plugin_loader(&opts.prefix, opts.dry_run, CHILD_LOG, |stream, line| {
+            report.line(stream, line)
+        });
     outcome.pluginloader = record(report, outcome, STEP_PLUGINLOADER, loader, opts);
 
     let desktop = desktop::create(
         &desktop::DesktopOptions {
             prefix: opts.prefix.clone(),
             dry_run: opts.dry_run,
-            log_path: opts.log_path.clone(),
+            log_path: CHILD_LOG,
         },
         |stream, line| report.line(stream, line),
     );
@@ -150,20 +146,15 @@ fn run_extras(
         }
     }
 
-    let settings = extras::seed_settings(
-        &opts.prefix,
-        opts.dry_run,
-        opts.log_path.clone(),
-        |stream, line| report.line(stream, line),
-    );
+    let settings = extras::seed_settings(&opts.prefix, opts.dry_run, CHILD_LOG, |stream, line| {
+        report.line(stream, line)
+    });
     outcome.settings = record(report, outcome, STEP_SETTINGS, settings, opts);
 
-    let webview2 = extras::install_webview2(
-        &opts.prefix,
-        opts.dry_run,
-        opts.log_path.clone(),
-        |stream, line| report.line(stream, line),
-    );
+    let webview2 =
+        extras::install_webview2(&opts.prefix, opts.dry_run, CHILD_LOG, |stream, line| {
+            report.line(stream, line)
+        });
     outcome.webview2 = record(report, outcome, STEP_WEBVIEW2, webview2, opts);
 
     Ok(())

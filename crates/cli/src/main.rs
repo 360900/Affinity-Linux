@@ -421,7 +421,7 @@ fn run_install(
         None => cfg.gpu_backend,
     };
     let opencl = opencl.unwrap_or(cfg.opencl);
-    let amd = gpu::detect().iter().any(|gpu| gpu.vendor == Vendor::Amd);
+    let amd = gpu::render_vendor(&prefix) == Some(Vendor::Amd);
 
     println!("install Affinity v3");
     println!("  distro    {} ({})", os.name(), os.family().label());
@@ -651,8 +651,8 @@ fn run_install(
 }
 
 fn print_outcome(outcome: &install::InstallReport) {
-    if outcome.used_msi_fallback {
-        println!("note: the embedded MSI fallback was used");
+    if outcome.used_setup_ui {
+        println!("note: the silent install failed; the Affinity setup window was used");
     }
     println!("  facades       {}", yes_no(outcome.facades));
     println!("  settings patch {}", yes_no(outcome.patched));

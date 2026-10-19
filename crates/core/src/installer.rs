@@ -1,4 +1,8 @@
-//! Run the Affinity v3 setup executable, with the embedded-MSI fallback.
+//! Install Affinity v3 silently from the MSI embedded in the setup executable,
+//! falling back to the interactive setup window.
+//!
+//! The setup (SetupUI.exe) is a wrapper that runs that same MSI, so the silent
+//! path installs the same files without asking the user to click through it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,7 +33,8 @@ pub struct InstallerOptions {
 #[derive(Debug, Clone)]
 pub struct InstallerOutcome {
     pub installer: PathBuf,
-    pub used_msi_fallback: bool,
+    /// The silent install failed and the user went through the setup window.
+    pub used_setup_ui: bool,
 }
 
 pub fn install<F>(opts: &InstallerOptions, on_line: F) -> Result<InstallerOutcome>
@@ -55,7 +60,7 @@ where
         dry_run(opts, &installer, &wine, &wine_dir, &mut report);
         return Ok(InstallerOutcome {
             installer,
-            used_msi_fallback: false,
+            used_setup_ui: false,
         });
     }
 
@@ -68,22 +73,33 @@ where
         report.warn(format!("could not set Windows 11: {error}"));
     }
 
-    report.info(format!("running {}", installer.display()));
-    let mut cmd = Command::new(&wine);
-    cmd.arg(&installer);
-    let result = run(&mut report, cmd, &envs, Duration::from_secs(3600))?;
-    if !result.success() {
-        report.warn(format!(
-            "the setup exited with {}; checking whether Affinity was installed anyway",
-            result.status
-        ));
+    let mut used_setup_ui = false;
+    match msi_install(&opts.prefix, &wine_dir, &wine, &installer, &mut report) {
+        Ok(()) if app_exe(&opts.prefix).exists() => {}
+        Ok(()) => {
+            report
+                .warn("the silent install did not create Affinity.exe; opening the Affinity setup");
+            used_setup_ui = true;
+        }
+        Err(error) => {
+            report.warn(format!(
+                "silent install failed: {error:#}; opening the Affinity setup"
+            ));
+            used_setup_ui = true;
+        }
     }
 
-    let mut used_msi_fallback = false;
-    if !app_exe(&opts.prefix).exists() {
-        report.warn("Affinity.exe was not installed by the setup; trying the embedded MSI");
-        msi_fallback(&opts.prefix, &wine_dir, &wine, &installer, &mut report)?;
-        used_msi_fallback = true;
+    if used_setup_ui {
+        report.info(format!("running {}", installer.display()));
+        let mut cmd = Command::new(&wine);
+        cmd.arg(&installer);
+        let result = run(&mut report, cmd, &envs, Duration::from_secs(3600))?;
+        if !result.success() {
+            report.warn(format!(
+                "the setup exited with {}; checking whether Affinity was installed anyway",
+                result.status
+            ));
+        }
     }
 
     if !app_exe(&opts.prefix).exists() {
@@ -96,7 +112,7 @@ where
     report.info("Affinity v3 installed");
     Ok(InstallerOutcome {
         installer,
-        used_msi_fallback,
+        used_setup_ui,
     })
 }
 
@@ -177,24 +193,35 @@ fn dry_run(
         report.info(format!("    {}", describe(&cmd, &envs)));
     }
 
-    let mut cmd = Command::new(wine);
-    cmd.arg(installer);
-    report.info(format!("    {}", describe(&cmd, &envs)));
     report.info(format!(
-        "    if {} is missing: 7z x -t# -y -o{}/.affinity-msi-<timestamp> {}",
-        app_exe(&opts.prefix).display(),
+        "    7z x -t# -y -o{}/.affinity-msi-<timestamp> {}",
         opts.prefix.display(),
         installer.display()
     ));
     let msi_log = opts.prefix.join("affinity-msi.log");
     report.info(format!(
-        "    {} msiexec /i Z:\\<temp>\\<largest>.msi REBOOT=ReallySuppress INSTALL_DESKTOP_SHORTCUT_PROPERTY=#0 /l*v {}",
+        "    {} msiexec /i Z:\\<temp>\\<largest>.msi /qn {} /l*v {}",
         wine.display(),
+        MSI_PROPERTIES.join(" "),
         to_windows_path(&msi_log)
+    ));
+    let mut cmd = Command::new(wine);
+    cmd.arg(installer);
+    report.info(format!(
+        "    if {} is missing: {}",
+        app_exe(&opts.prefix).display(),
+        describe(&cmd, &envs)
     ));
 }
 
-fn msi_fallback(
+/// What SetupUI passes to msiexec, minus the install dir (the MSI default is
+/// the same). No Windows desktop shortcut: we create our own launcher entry.
+const MSI_PROPERTIES: &[&str] = &[
+    "REBOOT=ReallySuppress",
+    "INSTALL_DESKTOP_SHORTCUT_PROPERTY=#0",
+];
+
+fn msi_install(
     prefix: &Path,
     wine_dir: &Path,
     wine: &Path,
@@ -221,7 +248,13 @@ fn msi_fallback(
         report.warn("7z reported warnings while extracting the MSI");
     }
 
-    let msi = largest_msi(&temp)?;
+    let msi = match largest_msi(&temp) {
+        Ok(msi) => msi,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&temp);
+            return Err(error);
+        }
+    };
     report.info(format!("installing embedded package {}", msi.display()));
 
     let envs = wine_env(prefix, wine_dir);
@@ -230,15 +263,14 @@ fn msi_fallback(
     let _ = run(report, wait, &envs, Duration::from_secs(120));
 
     let msi_log = prefix.join("affinity-msi.log");
+    report.info("installing silently; this can take a few minutes");
     let mut cmd = Command::new(wine);
     cmd.arg("msiexec")
         .arg("/i")
         .arg(to_windows_path(&msi))
-        .args([
-            "REBOOT=ReallySuppress",
-            "INSTALL_DESKTOP_SHORTCUT_PROPERTY=#0",
-            "/l*v",
-        ])
+        .arg("/qn")
+        .args(MSI_PROPERTIES)
+        .arg("/l*v")
         .arg(to_windows_path(&msi_log));
     let result = run(report, cmd, &envs, Duration::from_secs(3600))?;
     if !result.success() {
@@ -362,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_prints_setup_and_msi_fallback() {
+    fn dry_run_prints_silent_msi_then_setup() {
         let dir = tempfile::tempdir().unwrap();
         let mut lines = Vec::new();
         let outcome = install(&options(dir.path()), |_, line| {
@@ -372,8 +404,10 @@ mod tests {
         let text = lines.join("\n");
         assert!(text.contains("winecfg -v win11"));
         assert!(text.contains("Affinity-x64.exe"));
-        assert!(text.contains("7z x -t#"));
-        assert!(text.contains("msiexec"));
+        let msi = text.find("msiexec /i").unwrap();
+        assert!(text.find("7z x -t#").unwrap() < msi);
+        assert!(text[msi..].contains("/qn"));
+        assert!(text.find("if ").unwrap() > msi);
         assert!(!dir.path().join("Installer").exists());
         assert_eq!(
             outcome.installer,

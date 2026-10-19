@@ -163,11 +163,6 @@ where
     if dry_run {
         report.info(format!("    curl -fsSL {PLUGIN_RELEASE_API}"));
         report.info("    download affinitypluginloader*.zip and winefix*.zip, extract into the app directory");
-        report.info(format!(
-            "    timeout 15 {}/bin/wine {}/AffinityHook.exe",
-            prefix.join(WINE_DIR_NAME).display(),
-            app_dir.display()
-        ));
         return Ok(true);
     }
 
@@ -216,22 +211,8 @@ where
         return Ok(false);
     }
 
-    report.info("running AffinityHook.exe once to initialize");
-    let wine = prefix.join(WINE_DIR_NAME).join("bin/wine");
-    let envs = wine_env(prefix);
-    if which("timeout").is_some() {
-        let mut cmd = Command::new("timeout");
-        cmd.args(["15"]).arg(&wine).arg(&hook);
-        let _ = run(&mut report, cmd, &envs, Duration::from_secs(60));
-    } else {
-        let mut cmd = Command::new(&wine);
-        cmd.arg(&hook);
-        let _ = run(&mut report, cmd, &envs, Duration::from_secs(60));
-    }
-    let mut cmd = Command::new(prefix.join(WINE_DIR_NAME).join("bin/wineserver"));
-    cmd.arg("-k");
-    let _ = run(&mut report, cmd, &envs, Duration::from_secs(30));
-
+    // APL needs no first run: launching AffinityHook.exe is all it asks for,
+    // and the launcher and desktop entry already do that.
     let _ = fs::remove_dir_all(&temp);
     report.info("PluginLoader + WineFix installed");
     Ok(true)
@@ -394,16 +375,21 @@ fn apply_webview2_registry(prefix: &Path, report: &mut Report<'_>) -> Result<()>
     Ok(())
 }
 
+/// The runtime lives in a versioned folder, e.g.
+/// `EdgeWebView/Application/142.0.3595.94/msedgewebview2.exe`.
 fn webview2_installed(prefix: &Path) -> bool {
     ["Program Files (x86)", "Program Files"]
         .iter()
-        .any(|programs| {
+        .map(|programs| {
             prefix
                 .join("drive_c")
                 .join(programs)
-                .join("Microsoft/EdgeWebView/Application/msedgewebview2.exe")
-                .exists()
+                .join("Microsoft/EdgeWebView/Application")
         })
+        .filter_map(|application| fs::read_dir(application).ok())
+        .flatten()
+        .flatten()
+        .any(|entry| entry.path().join("msedgewebview2.exe").is_file())
 }
 
 fn facades_installed(prefix: &Path) -> bool {
@@ -512,9 +498,12 @@ mod tests {
     fn webview2_detection_looks_both_program_files() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!webview2_installed(dir.path()));
-        let exe = dir
+        let application = dir
             .path()
-            .join("drive_c/Program Files/Microsoft/EdgeWebView/Application/msedgewebview2.exe");
+            .join("drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application");
+        fs::create_dir_all(application.join("SetupMetrics")).unwrap();
+        assert!(!webview2_installed(dir.path()));
+        let exe = application.join("142.0.3595.94/msedgewebview2.exe");
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(exe, b"exe").unwrap();
         assert!(webview2_installed(dir.path()));

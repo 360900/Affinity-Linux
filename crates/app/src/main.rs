@@ -419,7 +419,7 @@ fn install_all(
         }
     }
 
-    if opencl && gpu::detect().iter().any(|gpu| gpu.vendor == Vendor::Amd) {
+    if opencl && gpu::render_vendor(&prefix) == Some(Vendor::Amd) {
         let plan = packages::amd_opencl_plan(&os);
         if !plan.steps.is_empty() {
             let elevation = if packages::is_root() {
