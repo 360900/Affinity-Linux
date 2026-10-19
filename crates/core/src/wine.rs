@@ -12,6 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use crate::distro::Family;
+use crate::http;
 use crate::journal::Report;
 use crate::manifest::now_epoch;
 use crate::runner::{self, RunOptions, RunResult, Stream};
@@ -523,14 +524,15 @@ fn install_wine(
 
     if dry_run {
         let release = release_for(&candidates[0])?;
+        let archive = http::cache_dir()?.join(&release.file_name);
         report.info(format!(
-            "    curl -fL {} -o {}",
-            release.url,
-            prefix.join(&release.file_name).display()
+            "    curl -fLR -z {0} -o {0} {1}",
+            archive.display(),
+            release.url
         ));
         report.info(format!(
             "    tar -xJf {} -C {} --no-same-owner",
-            prefix.join(&release.file_name).display(),
+            archive.display(),
             prefix.display()
         ));
         report.info(format!(
@@ -554,7 +556,6 @@ fn install_wine(
     let mut errors = Vec::new();
     for version in &candidates {
         let release = release_for(version)?;
-        let archive = prefix.join(&release.file_name);
 
         if let Some(dir) = find_wine_dir(prefix, version) {
             report.info(format!("found extracted Wine {version}"));
@@ -564,12 +565,19 @@ fn install_wine(
         }
 
         report.info(format!("downloading Wine {version}"));
-        if let Err(error) = download(report, &release.url, &archive) {
-            report.warn(format!("Wine {version} download failed: {error:#}"));
-            let _ = fs::remove_file(&archive);
-            errors.push(format!("{version}: download failed"));
-            continue;
-        }
+        let archive = match http::download_cached(
+            report,
+            &release.url,
+            &release.file_name,
+            Duration::from_secs(300),
+        ) {
+            Ok(archive) => archive,
+            Err(error) => {
+                report.warn(format!("Wine {version} download failed: {error:#}"));
+                errors.push(format!("{version}: download failed"));
+                continue;
+            }
+        };
 
         report.info(format!("extracting Wine {version}"));
         let mut cmd = Command::new("tar");
@@ -580,8 +588,9 @@ fn install_wine(
             .args(["--no-same-owner", "--overwrite"]);
         let run_opts = stream_opts(Some(Duration::from_secs(1800)));
         let result = run_logged(report, cmd, run_opts)?;
-        let _ = fs::remove_file(&archive);
         if !result.success() {
+            // Likely a damaged download; fetch it again next time.
+            let _ = fs::remove_file(&archive);
             report.warn(format!(
                 "Wine {version} extraction failed\n{}",
                 result.tail_text(10)

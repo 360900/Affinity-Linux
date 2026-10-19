@@ -116,63 +116,57 @@ where
     })
 }
 
+/// The latest Affinity setup, from the shared download cache.
+pub(crate) fn fetch_installer(report: &mut Report<'_>) -> Result<PathBuf> {
+    http::download_cached(
+        report,
+        INSTALLER_URL,
+        INSTALLER_NAME,
+        Duration::from_secs(300),
+    )
+}
+
 fn resolve_installer(opts: &InstallerOptions, report: &mut Report<'_>) -> Result<PathBuf> {
     let directory = opts.prefix.join("Installer");
-    let destination = match &opts.installer {
-        Some(source) => directory.join(
-            source
-                .file_name()
-                .unwrap_or_else(|| std::ffi::OsStr::new(INSTALLER_NAME)),
-        ),
-        None => directory.join(INSTALLER_NAME),
+    let Some(source) = &opts.installer else {
+        if opts.dry_run {
+            let cached = http::cache_dir()?.join(INSTALLER_NAME);
+            report.info(format!(
+                "    curl -fLR -z {0} -o {0} {INSTALLER_URL}",
+                cached.display()
+            ));
+            return Ok(cached);
+        }
+        // Older versions kept a 650 MB copy inside the prefix.
+        let _ = fs::remove_file(directory.join(INSTALLER_NAME));
+        let _ = fs::remove_dir(&directory);
+        return fetch_installer(report);
     };
 
+    let destination = directory.join(
+        source
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new(INSTALLER_NAME)),
+    );
     if opts.dry_run {
-        if let Some(source) = &opts.installer {
-            report.info(format!(
-                "    cp {} {}",
-                source.display(),
-                destination.display()
-            ));
-        } else {
-            report.info(format!(
-                "    mkdir -p {} && curl -fL -o {} {INSTALLER_URL}",
-                directory.display(),
-                destination.display()
-            ));
-        }
+        report.info(format!(
+            "    cp {} {}",
+            source.display(),
+            destination.display()
+        ));
         return Ok(destination);
     }
 
     fs::create_dir_all(&directory).with_context(|| format!("creating {}", directory.display()))?;
 
-    if let Some(source) = &opts.installer {
-        if !source.exists() {
-            bail!("installer not found: {}", source.display());
-        }
-        if source != &destination {
-            fs::copy(source, &destination).with_context(|| {
-                format!("copying {} to {}", source.display(), destination.display())
-            })?;
-        }
-        return Ok(destination);
+    if !source.exists() {
+        bail!("installer not found: {}", source.display());
     }
-
-    if destination
-        .metadata()
-        .map(|meta| meta.len() > 0)
-        .unwrap_or(false)
-    {
-        report.info(format!("using cached installer {}", destination.display()));
-        return Ok(destination);
+    if source != &destination {
+        fs::copy(source, &destination).with_context(|| {
+            format!("copying {} to {}", source.display(), destination.display())
+        })?;
     }
-
-    http::download(
-        report,
-        INSTALLER_URL,
-        &destination,
-        Duration::from_secs(300),
-    )?;
     Ok(destination)
 }
 
@@ -411,7 +405,7 @@ mod tests {
         assert!(!dir.path().join("Installer").exists());
         assert_eq!(
             outcome.installer,
-            dir.path().join("Installer").join(INSTALLER_NAME)
+            http::cache_dir().unwrap().join(INSTALLER_NAME)
         );
     }
 

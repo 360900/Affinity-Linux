@@ -253,6 +253,8 @@ fn build_patcher(prefix: &Path, report: &mut Report<'_>) -> Result<PathBuf> {
         .arg(&output)
         .args([
             "--no-incremental",
+            // Otherwise the compiler server keeps running after the install.
+            "--disable-build-servers",
             "-p:BuildProjectReferences=false",
             "/p:DisableImplicitNuGetFallbackFolder=true",
         ]);

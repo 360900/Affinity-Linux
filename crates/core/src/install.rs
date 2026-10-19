@@ -63,6 +63,25 @@ where
     Ok(outcome)
 }
 
+/// Downloads the Affinity setup (unless the user brought one) and WebView2
+/// into the shared cache. Meant for a background thread started with the
+/// install, so the downloads overlap Wine setup; `install` then finds them
+/// cached. Failures only warn: `install` downloads again if needed.
+pub fn prefetch<F>(log_path: Option<PathBuf>, with_installer: bool, on_line: F)
+where
+    F: FnMut(Stream, &str),
+{
+    let mut sink = on_line;
+    let mut report = Report::new(log_path, &mut sink);
+    report.info("downloading Affinity and WebView2 in the background");
+    if with_installer && let Err(error) = installer::fetch_installer(&mut report) {
+        report.warn(format!("background download failed: {error:#}"));
+    }
+    if let Err(error) = extras::fetch_webview2(&mut report) {
+        report.warn(format!("background download failed: {error:#}"));
+    }
+}
+
 /// Re-apply post-install fixes without running the Affinity installer again.
 pub fn repair<F>(opts: &InstallOptions, on_line: F) -> Result<InstallReport>
 where

@@ -318,23 +318,16 @@ where
     }
 
     if !installed {
-        let installer = prefix.join("WebView2Installer.exe");
         if which("wine").is_none() {
             report.warn("skipping WebView2: wine is missing");
             return Ok(false);
         }
-        http::download(
-            &mut report,
-            WEBVIEW2_URL,
-            &installer,
-            Duration::from_secs(300),
-        )?;
+        let installer = fetch_webview2(&mut report)?;
         let wine = prefix.join(WINE_DIR_NAME).join("bin/wine");
         let envs = wine_env(prefix);
         let mut cmd = Command::new(&wine);
         cmd.arg(&installer);
         let _ = run(&mut report, cmd, &envs, Duration::from_secs(1800));
-        let _ = fs::remove_file(&installer);
     }
 
     apply_webview2_registry(prefix, &mut report)?;
@@ -407,14 +400,19 @@ fn gac_path(prefix: &Path, name: &str) -> PathBuf {
 }
 
 fn dotnet48_cache_path() -> Result<PathBuf> {
-    let cache = match std::env::var_os("XDG_CACHE_HOME") {
-        Some(value) if !value.is_empty() => PathBuf::from(value),
-        _ => {
-            let home = std::env::var_os("HOME").context("HOME is not set")?;
-            PathBuf::from(home).join(".cache")
-        }
-    };
-    Ok(cache.join("winetricks/dotnet48").join(DOTNET48_INSTALLER))
+    Ok(http::xdg_cache_home()?
+        .join("winetricks/dotnet48")
+        .join(DOTNET48_INSTALLER))
+}
+
+/// The WebView2 installer, from the shared download cache.
+pub(crate) fn fetch_webview2(report: &mut Report<'_>) -> Result<PathBuf> {
+    http::download_cached(
+        report,
+        WEBVIEW2_URL,
+        "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
+        Duration::from_secs(300),
+    )
 }
 
 fn windows_user(prefix: &Path) -> String {

@@ -1,7 +1,9 @@
 //! Small network helpers built on curl/wget so the core stays dependency-free.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -11,6 +13,101 @@ use crate::journal::Report;
 use crate::runner::{self, RunOptions};
 
 const USER_AGENT: &str = "affinity-linux";
+const CURL_DOWNLOAD: &[&str] = &[
+    "-fL",
+    "--retry",
+    "3",
+    "--retry-delay",
+    "2",
+    "--connect-timeout",
+    "30",
+    "--progress-bar",
+    "-A",
+    USER_AGENT,
+];
+
+/// `$XDG_CACHE_HOME`, else `~/.cache`.
+pub(crate) fn xdg_cache_home() -> Result<PathBuf> {
+    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(cache));
+    }
+    let home = std::env::var_os("HOME").context("HOME is not set")?;
+    Ok(PathBuf::from(home).join(".cache"))
+}
+
+/// Large downloads kept outside the prefix, so a reinstall or a new prefix
+/// does not fetch them again.
+pub fn cache_dir() -> Result<PathBuf> {
+    Ok(xdg_cache_home()?.join(crate::APP_NAME))
+}
+
+fn file_lock(path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.entry(path.to_path_buf()).or_default().clone()
+}
+
+/// Download `url` into the cache as `name`. A cached copy is revalidated with
+/// curl's `-z` against the server's Last-Modified, so an unchanged file costs
+/// one request and a newer release is still picked up. When the server cannot
+/// be reached the cached copy is used.
+pub(crate) fn download_cached(
+    report: &mut Report<'_>,
+    url: &str,
+    name: &str,
+    stall: Duration,
+) -> Result<PathBuf> {
+    let path = cache_dir()?.join(name);
+    // A background prefetch may be fetching the same file.
+    let lock = file_lock(&path);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !path.is_file() {
+        download(report, url, &path, stall)?;
+        return Ok(path);
+    }
+    if which("curl").is_none() {
+        report.info(format!("using cached {}", path.display()));
+        return Ok(path);
+    }
+
+    let partial = path.with_extension("check.part");
+    let _ = std::fs::remove_file(&partial);
+    report.info(format!("checking {url} for a newer {name}"));
+    let mut cmd = Command::new("curl");
+    cmd.args(CURL_DOWNLOAD)
+        .arg("-R")
+        .arg("-z")
+        .arg(&path)
+        .arg("-o")
+        .arg(&partial)
+        .arg(url);
+    match run(report, cmd, stall) {
+        // On 304 Not Modified curl writes no file.
+        Ok(true)
+            if partial
+                .metadata()
+                .map(|meta| meta.len() > 0)
+                .unwrap_or(false) =>
+        {
+            finish(partial, &path)?;
+            report.info(format!("downloaded a newer {name}"));
+        }
+        Ok(true) => {
+            let _ = std::fs::remove_file(&partial);
+            report.info(format!("cached {name} is current"));
+        }
+        _ => {
+            let _ = std::fs::remove_file(&partial);
+            report.warn(format!(
+                "could not check for a newer {name}; using the cached copy"
+            ));
+        }
+    }
+    Ok(path)
+}
 
 /// Fetch a small text document (JSON API, key file) into memory.
 pub(crate) fn fetch_text(url: &str) -> Result<String> {
@@ -71,21 +168,12 @@ pub(crate) fn download(
     let mut last_error = String::new();
     if which("curl").is_some() {
         let mut cmd = Command::new("curl");
-        cmd.args([
-            "-fL",
-            "--retry",
-            "3",
-            "--retry-delay",
-            "2",
-            "--connect-timeout",
-            "30",
-            "--progress-bar",
-            "-A",
-            USER_AGENT,
-            "-o",
-        ])
-        .arg(&partial)
-        .arg(url);
+        cmd.args(CURL_DOWNLOAD)
+            // Keep the server's timestamp so `download_cached` can revalidate.
+            .arg("-R")
+            .arg("-o")
+            .arg(&partial)
+            .arg(url);
         match run(report, cmd, stall) {
             Ok(true) => return finish(partial, destination),
             Ok(false) => last_error = "curl failed".to_string(),

@@ -521,6 +521,12 @@ fn run_install(
     let log_path = log_dir.join(format!("install-{}.log", now_epoch()));
     println!("  log       {}", log_path.display());
 
+    let prefetch = {
+        let log_path = log_path.clone();
+        let with_installer = installer.is_none();
+        std::thread::spawn(move || install::prefetch(Some(log_path), with_installer, print_stream))
+    };
+
     if !skip_deps {
         let checks = deps::check_all();
         let missing = deps::missing(&checks);
@@ -640,6 +646,7 @@ fn run_install(
         dry_run: false,
         log_path: Some(log_path.clone()),
     };
+    let _ = prefetch.join();
     let outcome = install::install(&options, print_stream)?;
     print_outcome(&outcome);
 

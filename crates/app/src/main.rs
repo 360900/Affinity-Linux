@@ -415,6 +415,18 @@ fn install_all(
     fs::create_dir_all(prefix.join("logs"))?;
     let log_path = log_path.to_path_buf();
     let os = OsRelease::detect()?;
+    let prefetch = {
+        let tx = tx.clone();
+        let log_path = log_path.clone();
+        std::thread::spawn(move || {
+            install::prefetch(Some(log_path), true, |stream, line| {
+                let _ = tx.send(UiEvent::Log(
+                    line.to_string(),
+                    matches!(stream, Stream::Stderr),
+                ));
+            });
+        })
+    };
     let mut send = |stream: Stream, line: &str| {
         let _ = tx.send(UiEvent::Log(
             line.to_string(),
@@ -490,6 +502,7 @@ fn install_all(
         dry_run: false,
         log_path: Some(log_path),
     };
+    let _ = prefetch.join();
     install::install(&install_options, &mut send)?;
 
     let mut saved = cfg.clone();
