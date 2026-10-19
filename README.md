@@ -11,6 +11,7 @@ implementation of the Wine pipeline.
 
 - Dependency installation for Arch, Ubuntu-family, Fedora and openSUSE
 - Wine prefix bootstrap with dotnet48 verification
+- Automatic Wine DPI from the display's resolution and scale
 - GPU acceleration via vkd3d-proton or DXVK, optional OpenCL
 - Desktop entries, corruption guard, live log and visible errors
 - Every action supports `--dry-run`
@@ -52,7 +53,7 @@ chmod +x Affinity_Linux-<version>-x86_64.AppImage
 ./Affinity_Linux-<version>-x86_64.AppImage install --dry-run
 ```
 
-Other distros, from the release tarball or a source build:
+Other distros, from the release tarball (or after `make build`):
 
 ```sh
 sudo make install            # PREFIX=/usr/local by default
@@ -75,16 +76,16 @@ Building the GUI needs fontconfig headers (`libfontconfig1-dev`,
 GUI:
 
 ```sh
-cargo run --release -p affinity-linux-gui
+affinity-linux-gui
 ```
 
 CLI:
 
 ```sh
-affinity-linux install     # --installer <setup.exe>, --gpu vkd3d|dxvk, --opencl true|false
-affinity-linux launch
+affinity-linux install     # --installer <setup.exe>, --gpu vkd3d|dxvk, --opencl true|false, --dpi <96-480>
+affinity-linux launch      # --wayland (experimental)
 affinity-linux update
-affinity-linux repair      # re-apply fixes without reinstalling
+affinity-linux repair      # re-apply fixes without reinstalling, --dpi <96-480>
 affinity-linux uninstall
 ```
 
@@ -105,6 +106,8 @@ diagnostics: `doctor`, `deps`, `wine-setup`.
 
 - Config: `~/.config/affinity-linux/config.toml` (respects `XDG_CONFIG_HOME`)
 - Wine prefix: `~/.AffinityLinux` (override with `--prefix`)
+- Logs: `<prefix>/logs`
+- Download cache: `~/.cache/affinity-linux` (respects `XDG_CACHE_HOME`)
 
 ## License
 
