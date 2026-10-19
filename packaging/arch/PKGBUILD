@@ -1,6 +1,6 @@
 # Maintainer: 360900 <ziyad.koca@hotmail.com>
 pkgname=affinity-linux
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc='Installer and launcher for Affinity v3 on Linux'
 arch=('x86_64')
