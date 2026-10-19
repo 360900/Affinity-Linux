@@ -13,6 +13,15 @@ pub enum Vendor {
 }
 
 impl Vendor {
+    pub fn brand(&self) -> &'static str {
+        match self {
+            Vendor::Nvidia => "NVIDIA",
+            Vendor::Amd => "AMD",
+            Vendor::Intel => "Intel",
+            Vendor::Other => "this GPU",
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             Vendor::Nvidia => "nvidia",
@@ -126,6 +135,40 @@ pub fn render_vendor(prefix: &Path) -> Option<Vendor> {
     let selection =
         crate::config::read_prefix_state(prefix, ".gpu_config").unwrap_or_else(|| "auto".into());
     render_gpu(&detect(), &selection).map(|gpu| gpu.vendor)
+}
+
+/// OpenCL default when the user has not chosen: on for NVIDIA, where it works
+/// well under Wine; off for AMD and Intel, where upstream finds it unreliable.
+pub fn opencl_default(vendor: Option<Vendor>) -> bool {
+    vendor == Some(Vendor::Nvidia)
+}
+
+/// True when the host has an OpenCL driver (ICD) registered for `vendor`.
+/// Wine's opencl.dll forwards to it.
+pub fn opencl_driver_present(vendor: Vendor) -> bool {
+    let names: Vec<String> = std::fs::read_dir("/etc/OpenCL/vendors")
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    has_icd_for(vendor, &names)
+}
+
+fn has_icd_for(vendor: Vendor, icd_files: &[String]) -> bool {
+    // AMD counts only ROCm's ICD: upstream's AMD setup wants ROCm, and Mesa's
+    // rusticl/clover alone does not cover it.
+    let marker = match vendor {
+        Vendor::Nvidia => "nvidia",
+        Vendor::Amd => "amdocl",
+        Vendor::Intel => "intel",
+        Vendor::Other => return false,
+    };
+    icd_files
+        .iter()
+        .any(|name| name.ends_with(".icd") && name.contains(marker))
 }
 
 fn is_discrete(vendor: Vendor, name: &str, slot: &str) -> bool {
@@ -276,6 +319,27 @@ mod tests {
         assert_eq!(preferred(&arc).unwrap().slot, "0000:03:00.0");
 
         assert!(preferred(&laptop[1..]).is_none());
+    }
+
+    #[test]
+    fn opencl_defaults_on_for_nvidia_only() {
+        assert!(opencl_default(Some(Vendor::Nvidia)));
+        assert!(!opencl_default(Some(Vendor::Amd)));
+        assert!(!opencl_default(Some(Vendor::Intel)));
+        assert!(!opencl_default(None));
+    }
+
+    #[test]
+    fn matches_vendor_icd_files() {
+        let files = vec!["nvidia.icd".to_string(), "rusticl.icd".to_string()];
+        assert!(has_icd_for(Vendor::Nvidia, &files));
+        assert!(!has_icd_for(Vendor::Amd, &files));
+        assert!(has_icd_for(
+            Vendor::Amd,
+            &["amdocl64_60402.icd".to_string()]
+        ));
+        assert!(has_icd_for(Vendor::Intel, &["intel.icd".to_string()]));
+        assert!(!has_icd_for(Vendor::Intel, &[]));
     }
 
     #[test]

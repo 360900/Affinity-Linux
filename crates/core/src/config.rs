@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::gpu::{self, Vendor};
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GpuBackend {
@@ -18,7 +20,9 @@ pub enum GpuBackend {
 pub struct Config {
     pub prefix: PathBuf,
     pub gpu_backend: GpuBackend,
-    pub opencl: bool,
+    /// Install the render GPU's OpenCL driver. `None` until the user picks
+    /// something other than the default from `gpu::opencl_default`.
+    pub opencl: Option<bool>,
     /// Override distro detection, mainly for dry-run testing.
     pub distro_override: Option<String>,
 }
@@ -28,13 +32,23 @@ impl Default for Config {
         Self {
             prefix: default_prefix(),
             gpu_backend: GpuBackend::default(),
-            opencl: false,
+            opencl: None,
             distro_override: None,
         }
     }
 }
 
 impl Config {
+    pub fn opencl_enabled(&self, render: Option<Vendor>) -> bool {
+        self.opencl.unwrap_or_else(|| gpu::opencl_default(render))
+    }
+
+    /// Stores the OpenCL choice, or clears it when it matches the default,
+    /// so the default keeps following the GPU.
+    pub fn set_opencl(&mut self, enabled: bool, render: Option<Vendor>) {
+        self.opencl = (enabled != gpu::opencl_default(render)).then_some(enabled);
+    }
+
     /// Load the app config, falling back to defaults when the file is absent.
     pub fn load() -> Result<Self> {
         Self::load_from(&config_path())
@@ -130,15 +144,31 @@ mod tests {
         let cfg = Config {
             prefix: PathBuf::from("/tmp/prefix"),
             gpu_backend: GpuBackend::Dxvk,
-            opencl: true,
+            opencl: Some(true),
             distro_override: Some("ubuntu".into()),
         };
         cfg.save_to(&path).unwrap();
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded.prefix, PathBuf::from("/tmp/prefix"));
         assert_eq!(loaded.gpu_backend, GpuBackend::Dxvk);
-        assert!(loaded.opencl);
+        assert_eq!(loaded.opencl, Some(true));
         assert_eq!(loaded.distro_override.as_deref(), Some("ubuntu"));
+    }
+
+    #[test]
+    fn opencl_follows_the_gpu_until_changed() {
+        let mut cfg = Config::default();
+        assert!(cfg.opencl_enabled(Some(Vendor::Nvidia)));
+        assert!(!cfg.opencl_enabled(Some(Vendor::Amd)));
+
+        cfg.set_opencl(true, Some(Vendor::Nvidia));
+        assert_eq!(cfg.opencl, None);
+        cfg.set_opencl(true, Some(Vendor::Amd));
+        assert_eq!(cfg.opencl, Some(true));
+        assert!(cfg.opencl_enabled(Some(Vendor::Amd)));
+
+        let old: Config = toml::from_str("opencl = false").unwrap();
+        assert!(!old.opencl_enabled(Some(Vendor::Nvidia)));
     }
 
     #[test]

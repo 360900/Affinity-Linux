@@ -47,7 +47,7 @@ fn main() -> Result<(), slint::PlatformError> {
     } else {
         0
     });
-    ui.set_opencl_enabled(cfg.opencl);
+    ui.set_opencl_enabled(cfg.opencl_enabled(gpu::render_vendor(&cfg.prefix)));
     if let Some(family) = monospace_family() {
         ui.set_mono_font(family.into());
     }
@@ -236,6 +236,41 @@ fn display_info(ui: &MainWindow) -> DisplayInfo {
     }
 }
 
+/// Installs the OpenCL driver for the GPU Affinity renders on, if missing.
+/// Optional: a failure is logged and the job continues.
+fn install_opencl_driver(
+    os: &OsRelease,
+    prefix: &Path,
+    tx: &Sender<UiEvent>,
+    log_path: &Path,
+    send: &mut dyn FnMut(Stream, &str),
+) {
+    let plan = packages::opencl_plan(os, gpu::render_vendor(prefix));
+    for note in &plan.notes {
+        job_info(tx, log_path, format!("OpenCL: {note}"));
+    }
+    if plan.steps.is_empty() {
+        return;
+    }
+    let elevation = if packages::is_root() {
+        Elevation::None
+    } else {
+        Elevation::Pkexec
+    };
+    let options = PlanRunOptions {
+        dry_run: false,
+        elevation,
+        log_path: Some(log_path.to_path_buf()),
+    };
+    if let Err(error) = packages::run_plan(&plan, &options, send) {
+        job_warn(
+            tx,
+            log_path,
+            format!("warning: OpenCL driver install failed: {error:#}"),
+        );
+    }
+}
+
 /// Picks the Wine DPI for the display and logs how it was chosen.
 fn display_dpi(display: DisplayInfo, tx: &Sender<UiEvent>, log_path: &Path) -> u32 {
     let x = wine::detect_x_scaling();
@@ -419,21 +454,8 @@ fn install_all(
         }
     }
 
-    if opencl && gpu::render_vendor(&prefix) == Some(Vendor::Amd) {
-        let plan = packages::amd_opencl_plan(&os);
-        if !plan.steps.is_empty() {
-            let elevation = if packages::is_root() {
-                Elevation::None
-            } else {
-                Elevation::Pkexec
-            };
-            let options = PlanRunOptions {
-                dry_run: false,
-                elevation,
-                log_path: Some(log_path.clone()),
-            };
-            let _ = packages::run_plan(&plan, &options, &mut send);
-        }
+    if opencl {
+        install_opencl_driver(&os, &prefix, tx, &log_path, &mut send);
     }
 
     let dpi = display_dpi(display, tx, &log_path);
@@ -451,7 +473,6 @@ fn install_all(
     let backend_options = backends::BackendOptions {
         prefix: prefix.clone(),
         backend,
-        opencl,
         dry_run: false,
         log_path: Some(log_path.clone()),
     };
@@ -473,7 +494,7 @@ fn install_all(
 
     let mut saved = cfg.clone();
     saved.gpu_backend = backend;
-    saved.opencl = opencl;
+    saved.set_opencl(opencl, gpu::render_vendor(&prefix));
     saved.save()?;
     Ok(())
 }
@@ -559,7 +580,6 @@ fn spawn_repair(
             let backend_options = backends::BackendOptions {
                 prefix: prefix.clone(),
                 backend,
-                opencl,
                 dry_run: false,
                 log_path: Some(log_path.clone()),
             };
@@ -577,9 +597,13 @@ fn spawn_repair(
                 log_path: Some(log_path.clone()),
             };
             install::repair(&options, &mut send)?;
+            if opencl {
+                let os = OsRelease::detect()?;
+                install_opencl_driver(&os, &cfg.prefix, &tx, &log_path, &mut send);
+            }
             let mut saved = cfg.clone();
             saved.gpu_backend = backend;
-            saved.opencl = opencl;
+            saved.set_opencl(opencl, gpu::render_vendor(&cfg.prefix));
             saved.save()?;
             Ok(())
         })();

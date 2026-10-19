@@ -37,7 +37,6 @@ pub const DXVK_DLLS: [&str; 7] = [
 pub struct BackendOptions {
     pub prefix: PathBuf,
     pub backend: GpuBackend,
-    pub opencl: bool,
     pub dry_run: bool,
     pub log_path: Option<PathBuf>,
 }
@@ -47,7 +46,6 @@ pub struct BackendOutcome {
     pub backend: GpuBackend,
     pub vkd3d_version: Option<String>,
     pub dxvk_version: Option<String>,
-    pub opencl: bool,
 }
 
 pub fn install<F>(opts: &BackendOptions, on_line: F) -> Result<BackendOutcome>
@@ -60,7 +58,6 @@ where
     let wine = wine_dir.join("bin/wine");
     let mut outcome = BackendOutcome {
         backend: opts.backend,
-        opencl: opts.opencl,
         ..BackendOutcome::default()
     };
 
@@ -111,19 +108,13 @@ where
         ".dxvk_vkd3d_preference",
         backend_name(opts.backend),
     );
-    let _ = config::write_prefix_state(
-        &opts.prefix,
-        ".opencl_enabled",
-        if opts.opencl { "1" } else { "0" },
-    );
     if config::read_prefix_state(&opts.prefix, ".gpu_config").is_none() {
         let _ = config::write_prefix_state(&opts.prefix, ".gpu_config", "auto");
     }
 
     report.info(format!(
-        "GPU backend configured: {}{}",
-        backend_name(opts.backend),
-        if opts.opencl { " (OpenCL)" } else { "" }
+        "GPU backend configured: {}",
+        backend_name(opts.backend)
     ));
     Ok(outcome)
 }
@@ -218,11 +209,6 @@ fn dry_run(opts: &BackendOptions, report: &mut Report<'_>) {
         "would write {} = {}",
         opts.prefix.join(".dxvk_vkd3d_preference").display(),
         backend_name(opts.backend)
-    ));
-    report.info(format!(
-        "would write {} = {}",
-        opts.prefix.join(".opencl_enabled").display(),
-        if opts.opencl { "1" } else { "0" }
     ));
 }
 
@@ -598,7 +584,6 @@ mod tests {
         let opts = BackendOptions {
             prefix: prefix.clone(),
             backend: GpuBackend::Vkd3d,
-            opencl: true,
             dry_run: true,
             log_path: None,
         };
@@ -608,7 +593,6 @@ mod tests {
         let text = lines.join("\n");
         assert!(text.contains("vkd3d-proton-3.0a.tar.zst"));
         assert!(text.contains("d3d12core"));
-        assert!(text.contains(".opencl_enabled = 1"));
         assert!(!prefix.join("vkd3d_dlls").exists());
         assert!(!prefix.join(".cache").exists());
     }
@@ -621,7 +605,6 @@ mod tests {
         let opts = BackendOptions {
             prefix,
             backend: GpuBackend::Dxvk,
-            opencl: false,
             dry_run: true,
             log_path: None,
         };
@@ -630,7 +613,6 @@ mod tests {
         let text = lines.join("\n");
         assert!(text.contains("winetricks --unattended --no-isolate --optout --force dxvk"));
         assert!(text.contains("/v d3d8 "));
-        assert!(text.contains(".opencl_enabled = 0"));
     }
 
     #[test]

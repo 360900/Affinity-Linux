@@ -11,7 +11,7 @@ use affinity_linux_core::config::{Config, GpuBackend, default_prefix};
 use affinity_linux_core::deps;
 use affinity_linux_core::distro::OsRelease;
 use affinity_linux_core::doctor::{self, DoctorReport};
-use affinity_linux_core::gpu::{self, Vendor};
+use affinity_linux_core::gpu;
 use affinity_linux_core::install;
 use affinity_linux_core::launch;
 use affinity_linux_core::manifest::{
@@ -95,7 +95,8 @@ enum Command {
         /// GPU backend override: vkd3d or dxvk
         #[arg(long, value_parser = ["vkd3d", "dxvk"])]
         gpu: Option<String>,
-        /// Enable OpenCL: true or false
+        /// Install the render GPU's OpenCL driver for Affinity's hardware
+        /// acceleration: true or false (default: on for NVIDIA, off otherwise)
         #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
         opencl: Option<bool>,
         /// Wine DPI to set, 96 = 100% (default: leave unchanged)
@@ -420,8 +421,8 @@ fn run_install(
         Some(other) => bail!("unknown GPU backend '{other}'"),
         None => cfg.gpu_backend,
     };
-    let opencl = opencl.unwrap_or(cfg.opencl);
-    let amd = gpu::render_vendor(&prefix) == Some(Vendor::Amd);
+    let render = gpu::render_vendor(&prefix);
+    let opencl = opencl.unwrap_or_else(|| cfg.opencl_enabled(render));
 
     println!("install Affinity v3");
     println!("  distro    {} ({})", os.name(), os.family().label());
@@ -450,13 +451,13 @@ fn run_install(
         }
     );
     println!(
-        "  backend   {}{}",
+        "  backend   {}",
         match backend {
             GpuBackend::Vkd3d => "vkd3d",
             GpuBackend::Dxvk => "dxvk",
-        },
-        if opencl { " (OpenCL)" } else { "" }
+        }
     );
+    println!("  opencl    {}", if opencl { "on" } else { "off" });
     println!();
 
     if dry_run {
@@ -480,8 +481,11 @@ fn run_install(
             };
             wine::setup(&options, print_stream)?;
         }
-        if opencl && amd {
-            let plan = packages::amd_opencl_plan(&os);
+        if opencl {
+            let plan = packages::opencl_plan(&os, render);
+            for note in &plan.notes {
+                println!("note: {note}");
+            }
             let options = PlanRunOptions {
                 dry_run: true,
                 elevation: packages::default_elevation(),
@@ -492,7 +496,6 @@ fn run_install(
         let backend_options = backends::BackendOptions {
             prefix: prefix.clone(),
             backend,
-            opencl,
             dry_run: true,
             log_path: None,
         };
@@ -550,15 +553,15 @@ fn run_install(
         }
     }
 
-    if !skip_deps && opencl && amd {
-        let plan = packages::amd_opencl_plan(&os);
+    if !skip_deps && opencl {
+        let plan = packages::opencl_plan(&os, render);
         for note in &plan.notes {
             println!("note: {note}");
         }
         if !plan.steps.is_empty() {
             let elevation = packages::default_elevation();
             if elevation == Elevation::Sudo && deps::which("sudo").is_none() {
-                println!("warning: sudo is missing; skipping AMD OpenCL packages");
+                println!("warning: sudo is missing; skipping the OpenCL driver");
             } else {
                 let options = PlanRunOptions {
                     dry_run: false,
@@ -612,7 +615,6 @@ fn run_install(
     let backend_options = backends::BackendOptions {
         prefix: prefix.clone(),
         backend,
-        opencl,
         dry_run: false,
         log_path: Some(log_path.clone()),
     };
@@ -644,7 +646,7 @@ fn run_install(
     let mut saved = cfg.clone();
     saved.prefix = prefix;
     saved.gpu_backend = backend;
-    saved.opencl = opencl;
+    saved.set_opencl(opencl, render);
     saved.save()?;
     println!("saved install location and GPU settings in the config");
     Ok(())
@@ -770,7 +772,6 @@ fn run_repair(
     let backend_options = backends::BackendOptions {
         prefix: prefix.clone(),
         backend: cfg.gpu_backend,
-        opencl: cfg.opencl,
         dry_run,
         log_path: log_path.clone(),
     };

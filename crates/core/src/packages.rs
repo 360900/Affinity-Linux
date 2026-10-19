@@ -12,6 +12,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 
 use crate::distro::{Family, OsRelease};
+use crate::gpu::{self, Vendor};
 use crate::runner::{self, RunOptions, Stream};
 
 const WINEHQ_KEY: &str = "https://dl.winehq.org/wine-builds/winehq.key";
@@ -301,9 +302,84 @@ fn suse_plan() -> (String, Vec<PackageStep>) {
     )
 }
 
-/// Optional OpenCL packages for AMD GPUs. Upstream only automates Fedora,
-/// Arch-family and PikaOS; everything else gets a note.
-pub fn amd_opencl_plan(os: &OsRelease) -> PackagePlan {
+/// The host OpenCL driver for the GPU Affinity renders on, which Wine's
+/// opencl.dll forwards to. Empty, with a note, when the driver is already
+/// registered or cannot be installed automatically.
+pub fn opencl_plan(os: &OsRelease, vendor: Option<Vendor>) -> PackagePlan {
+    let note = |text: String| PackagePlan {
+        family: os.family(),
+        flavor: "opencl".to_string(),
+        steps: Vec::new(),
+        notes: vec![text],
+    };
+    let Some(vendor) = vendor else {
+        return note("no GPU detected; skipping the OpenCL driver".to_string());
+    };
+    if gpu::opencl_driver_present(vendor) {
+        return note(format!(
+            "the {} OpenCL driver is already installed",
+            vendor.brand()
+        ));
+    }
+    match vendor {
+        Vendor::Amd => amd_opencl_plan(os),
+        Vendor::Nvidia => vendor_opencl_plan(
+            os,
+            vendor,
+            "opencl-nvidia ocl-icd",
+            // RPM Fusion's NVIDIA driver ships its OpenCL library here.
+            Some("xorg-x11-drv-nvidia-cuda-libs ocl-icd"),
+            None,
+        ),
+        Vendor::Intel => vendor_opencl_plan(
+            os,
+            vendor,
+            "intel-compute-runtime ocl-icd",
+            Some("intel-compute-runtime ocl-icd"),
+            Some("intel-opencl-icd ocl-icd-libopencl1"),
+        ),
+        Vendor::Other => note("no OpenCL driver is known for this GPU".to_string()),
+    }
+}
+
+fn vendor_opencl_plan(
+    os: &OsRelease,
+    vendor: Vendor,
+    pacman: &str,
+    dnf: Option<&str>,
+    apt: Option<&str>,
+) -> PackagePlan {
+    let family = os.family();
+    let label = format!("Install the {} OpenCL driver", vendor.brand());
+    let script = match family {
+        Family::Arch => Some(pacman_install("-S", pacman)),
+        Family::Fedora => dnf.map(|packages| format!("dnf install -y {packages}")),
+        Family::Ubuntu | Family::Debian => {
+            apt.map(|packages| format!("apt-get install -y {packages}"))
+        }
+        _ => None,
+    };
+    let (steps, notes) = match script {
+        Some(script) => (vec![PackageStep::root_optional(label, script)], Vec::new()),
+        None => (
+            Vec::new(),
+            vec![format!(
+                "the {} OpenCL driver is not automated for this distribution; install it with your GPU driver",
+                vendor.brand()
+            )],
+        ),
+    };
+    PackagePlan {
+        family,
+        flavor: format!("{}-opencl", vendor.label()),
+        steps,
+        notes,
+    }
+}
+
+/// OpenCL packages for AMD GPUs. Upstream only automates Fedora, Arch-family
+/// and PikaOS; everything else gets a note.
+fn amd_opencl_plan(os: &OsRelease) -> PackagePlan {
     let family = os.family();
     let id = os.id.to_ascii_lowercase();
     let (major, _) = version_tuple(os);
@@ -615,6 +691,25 @@ mod tests {
         let bazzite = plan_for("ID=bazzite\nID_LIKE=fedora\n");
         assert!(bazzite.steps.is_empty());
         assert!(bazzite.notes.iter().any(|note| note.contains("immutable")));
+    }
+
+    #[test]
+    fn opencl_driver_per_vendor_and_distro() {
+        let arch = OsRelease::parse("ID=cachyos\nID_LIKE=arch\n");
+        let nvidia = vendor_opencl_plan(&arch, Vendor::Nvidia, "opencl-nvidia ocl-icd", None, None);
+        assert!(scripts(&nvidia).contains("pacman -T opencl-nvidia ocl-icd"));
+        assert!(nvidia.steps[0].optional);
+
+        let ubuntu = OsRelease::parse("ID=ubuntu\nVERSION_ID=\"24.04\"\n");
+        let manual = vendor_opencl_plan(&ubuntu, Vendor::Nvidia, "x", None, None);
+        assert!(manual.steps.is_empty());
+        assert!(manual.notes[0].contains("NVIDIA"));
+
+        let intel = vendor_opencl_plan(&ubuntu, Vendor::Intel, "x", None, Some("intel-opencl-icd"));
+        assert!(scripts(&intel).contains("apt-get install -y intel-opencl-icd"));
+
+        let none = opencl_plan(&arch, None);
+        assert!(none.steps.is_empty());
     }
 
     #[test]
