@@ -33,6 +33,8 @@ enum UiEvent {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    // Matches the desktop file name, so Wayland compositors show its icon.
+    slint::set_xdg_app_id("io.github._360900.AffinityLinux")?;
     let ui = MainWindow::new()?;
     let cfg = Config::load().unwrap_or_else(|err| {
         eprintln!("config: {err:#}");
