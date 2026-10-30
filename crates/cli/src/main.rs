@@ -23,6 +23,8 @@ use affinity_linux_core::runner::Stream;
 use affinity_linux_core::uninstall;
 use affinity_linux_core::wine;
 
+mod display;
+
 #[derive(Parser)]
 #[command(
     name = "affinity-linux",
@@ -99,7 +101,7 @@ enum Command {
         /// acceleration: true or false (default: on for NVIDIA, off otherwise)
         #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
         opencl: Option<bool>,
-        /// Wine DPI to set, 96 = 100% (default: leave unchanged)
+        /// Wine DPI to set, 96 = 100% (default: detected from the display)
         #[arg(long, value_parser = clap::value_parser!(u32).range(96..=480))]
         dpi: Option<u32>,
     },
@@ -129,7 +131,7 @@ enum Command {
         /// Prefix override
         #[arg(long)]
         prefix: Option<PathBuf>,
-        /// Wine DPI to set, 96 = 100% (default: leave unchanged)
+        /// Wine DPI to set, 96 = 100% (default: detected from the display)
         #[arg(long, value_parser = clap::value_parser!(u32).range(96..=480))]
         dpi: Option<u32>,
     },
@@ -382,6 +384,25 @@ fn run_wine_setup(
     Ok(())
 }
 
+/// An explicit `--dpi` wins; otherwise the display decides. Without a
+/// detectable display the prefix's DPI is left alone.
+fn resolve_dpi(dpi: Option<u32>) -> Option<u32> {
+    if let Some(dpi) = dpi {
+        println!("  dpi       {dpi} (--dpi)");
+        return Some(dpi);
+    }
+    match display::detect_dpi() {
+        Some((dpi, summary)) => {
+            println!("  dpi       {summary}");
+            Some(dpi)
+        }
+        None => {
+            println!("  dpi       unchanged (no display detected)");
+            None
+        }
+    }
+}
+
 fn print_stream(stream: Stream, line: &str) {
     match stream {
         Stream::Stdout => println!("{line}"),
@@ -458,6 +479,7 @@ fn run_install(
         }
     );
     println!("  opencl    {}", if opencl { "on" } else { "off" });
+    let dpi = if skip_wine { None } else { resolve_dpi(dpi) };
     println!();
 
     if dry_run {
@@ -751,6 +773,7 @@ fn run_repair(
     let prefix = prefix.unwrap_or_else(|| cfg.prefix.clone());
     println!("repair Affinity v3");
     println!("  prefix    {}", prefix.display());
+    let dpi = resolve_dpi(dpi);
 
     if !dry_run {
         ensure_installed(&prefix)?;

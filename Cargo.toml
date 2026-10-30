@@ -18,6 +18,8 @@ toml = "0.8"
 slint = "~1.18"
 slint-build = "~1.18"
 tempfile = "3"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 
 [profile.release]
 strip = true

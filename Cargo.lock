@@ -140,6 +140,8 @@ dependencies = [
  "anyhow",
  "clap",
  "serde_json",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]

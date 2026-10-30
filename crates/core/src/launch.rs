@@ -315,7 +315,7 @@ fn vulkan_runtime_env(wayland: bool, nvidia: bool) -> Vec<(&'static str, &'stati
     env
 }
 
-pub(crate) fn wayland_session() -> bool {
+pub fn wayland_session() -> bool {
     std::env::var("XDG_SESSION_TYPE")
         .map(|value| value.eq_ignore_ascii_case("wayland"))
         .unwrap_or(false)
