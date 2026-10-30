@@ -65,7 +65,7 @@ sudo make uninstall
 Requires Rust 1.85+.
 
 ```sh
-cargo build --release --workspace
+make build                   # cargo build --release --locked --workspace
 ```
 
 Building the GUI needs fontconfig headers (`libfontconfig1-dev`,
@@ -76,20 +76,22 @@ Building the GUI needs fontconfig headers (`libfontconfig1-dev`,
 GUI:
 
 ```sh
-affinity-linux-gui
+affinity-linux-gui                          # installed
+cargo run --release -p affinity-linux-gui   # from a source checkout
 ```
 
 CLI:
 
 ```sh
-affinity-linux install     # --installer <setup.exe>, --gpu vkd3d|dxvk, --opencl true|false, --dpi <96-480>
+affinity-linux install     # --installer <setup.exe>, --gpu vkd3d|dxvk, --opencl true|false, --dpi <n>
 affinity-linux launch      # --wayland (experimental)
 affinity-linux update
-affinity-linux repair      # re-apply fixes without reinstalling, --dpi <96-480>
+affinity-linux repair      # re-apply fixes without reinstalling, --dpi <n>
 affinity-linux uninstall
 ```
 
-Add `--dry-run` to preview changes and `--yes` to skip prompts. Hidden
+`--dpi` takes 96 to 480 (96 = 100%) and defaults to the display's DPI. Add
+`--dry-run` to preview changes and `--yes` to skip prompts. Hidden
 diagnostics: `doctor`, `deps`, `wine-setup`.
 
 ## Layout
