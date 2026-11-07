@@ -1,5 +1,7 @@
 # Affinity Linux
 
+![Affinity Linux installer](docs/img/affinity-linux-gui.png)
+
 One-click installer and launcher for Affinity v3 on Linux. Handles system
 dependencies, Wine, winetricks, .NET 4.8, GPU backends and post-install fixes,
 then keeps the install healthy with repair, update and uninstall.
