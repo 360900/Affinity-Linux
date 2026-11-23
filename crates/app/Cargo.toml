@@ -13,5 +13,8 @@ affinity-linux-core = { path = "../core" }
 anyhow.workspace = true
 slint = { workspace = true, features = ["unstable-winit-030"] }
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [build-dependencies]
 slint-build.workspace = true

@@ -290,11 +290,15 @@ fn can_register_url_handler(prefix: &Path) -> bool {
 }
 
 fn applications_dir() -> Result<PathBuf> {
-    let data = match std::env::var_os("XDG_DATA_HOME") {
-        Some(value) if !value.is_empty() => PathBuf::from(value),
-        _ => home_dir()?.join(".local/share"),
-    };
-    Ok(data.join("applications"))
+    Ok(data_home()?.join("applications"))
+}
+
+/// `$XDG_DATA_HOME`, else `~/.local/share`.
+pub fn data_home() -> Result<PathBuf> {
+    match std::env::var_os("XDG_DATA_HOME") {
+        Some(value) if !value.is_empty() => Ok(PathBuf::from(value)),
+        _ => Ok(home_dir()?.join(".local/share")),
+    }
 }
 
 /// Resolve the user's desktop directory via XDG user-dirs, falling back to `~/Desktop`.
@@ -363,7 +367,7 @@ fn escape_desktop_string(text: &str) -> String {
 
 /// Quote a single argument for a `.desktop` `Exec=` line per the Freedesktop
 /// Desktop Entry Specification.
-fn quote(text: &str) -> String {
+pub fn quote(text: &str) -> String {
     let escaped_percent = text.replace('%', "%%");
     if !escaped_percent.is_empty()
         && escaped_percent

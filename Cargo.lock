@@ -163,6 +163,7 @@ dependencies = [
  "anyhow",
  "slint",
  "slint-build",
+ "tempfile",
 ]
 
 [[package]]

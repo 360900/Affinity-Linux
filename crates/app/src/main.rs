@@ -1,5 +1,7 @@
 slint::include_modules!();
 
+mod integration;
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -36,10 +38,11 @@ enum UiEvent {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    integration::register();
     let ui = MainWindow::new()?;
     // Matches the desktop file name, so Wayland compositors show its icon.
     // Needs the platform that `MainWindow::new` creates; read when the window is shown.
-    slint::set_xdg_app_id("io.github._360900.AffinityLinux")?;
+    slint::set_xdg_app_id(integration::APP_ID)?;
     let cfg = Config::load().unwrap_or_else(|err| {
         eprintln!("config: {err:#}");
         Config::default()
