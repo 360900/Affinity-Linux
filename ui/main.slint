@@ -1,37 +1,38 @@
-import { Button, ComboBox, Palette, ProgressIndicator, ScrollView, Switch } from "std-widgets.slint";
+import { Palette, ProgressIndicator, ScrollView } from "std-widgets.slint";
 
 export struct LogLine {
     text: string,
     error: bool,
 }
 
-// Fluent (WinUI) surface and text tokens. Light and dark follow the system scheme.
+// One design language: opaque content, one accent, concentric radii,
+// hairlines and soft shadows. Only the dialog floats.
 global Theme {
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
-    out property <color> window-bg: dark ? #202020 : #f3f3f3;
-    out property <color> card-bg: dark ? #2b2b2b : #fbfbfb;
-    out property <color> stroke: dark ? #1d1d1d : #e5e5e5;
-    out property <color> divider: dark ? #ffffff14 : #0000000f;
-    out property <color> text-primary: Palette.foreground;
-    out property <color> text-secondary: dark ? #ffffffc9 : #0000009e;
-    out property <color> text-tertiary: dark ? #ffffff8a : #00000072;
-    out property <color> subtle-hover: dark ? #ffffff0f : #00000009;
-    out property <color> subtle-pressed: dark ? #ffffff0a : #00000006;
-    out property <color> success: dark ? #6ccb5f : #0f7b0f;
-    out property <color> caution: dark ? #fce100 : #9d5d00;
-    out property <color> critical: dark ? #ff99a4 : #c42b1c;
-    out property <color> critical-bg: dark ? #442726 : #fde7e9;
-    out property <color> scrim: dark ? #00000080 : #0000004d;
-    out property <color> dialog-bg: dark ? #2b2b2b : #ffffff;
-    out property <color> dialog-footer: dark ? #202020 : #f3f3f3;
-    out property <color> log-bg: dark ? #1c1c1c : #ffffff;
+    out property <color> canvas: dark ? #25272b : #f5f6f8;
+    out property <color> surface: dark ? #2d3035 : #ffffff;
+    out property <color> surface-alt: dark ? #33373d : #f0f2f5;
+    out property <color> text: Palette.foreground;
+    out property <color> text-2: dark ? #ffffffc4 : #0000009e;
+    out property <color> text-3: dark ? #ffffff85 : #0000006b;
+    out property <color> stroke: dark ? #ffffff18 : #00000012;
+    out property <color> hover: dark ? #ffffff0d : #00000008;
+    out property <color> pressed: dark ? #ffffff16 : #0000000f;
+    out property <color> accent: Palette.accent-background;
+    out property <color> on-accent: Palette.accent-foreground;
+    out property <color> accent-soft: Palette.accent-background.transparentize(0.86);
+    out property <color> success: dark ? #7bd88a : #167c33;
+    out property <color> warning: dark ? #f5c84c : #8a5a00;
+    out property <color> danger: dark ? #ff9aa2 : #c02b2b;
+    out property <color> danger-soft: dark ? #4a292a : #fdecec;
+    out property <color> scrim: dark ? #000000a6 : #00000052;
 }
 
 component Card inherits Rectangle {
-    background: Theme.card-bg;
+    background: Theme.surface;
     border-width: 1px;
     border-color: Theme.stroke;
-    border-radius: 6px;
+    border-radius: 14px;
     vertical-stretch: 0;
 }
 
@@ -42,22 +43,23 @@ component Section inherits VerticalLayout {
 
     Text {
         text: root.title;
-        color: Theme.text-primary;
-        font-weight: 600;
+        color: Theme.text;
+        font-size: 15px;
+        font-weight: 700;
         vertical-stretch: 0;
     }
 
     @children
 }
 
-component InfoLabel inherits Text {
-    color: Theme.text-secondary;
+component RowLabel inherits Text {
+    color: Theme.text-2;
     horizontal-stretch: 0;
     vertical-stretch: 0;
 }
 
-component InfoValue inherits Text {
-    color: Theme.text-primary;
+component RowValue inherits Text {
+    color: Theme.text;
     horizontal-stretch: 1;
     vertical-stretch: 0;
     overflow: elide;
@@ -81,12 +83,12 @@ component OptionRow inherits Rectangle {
 
             Text {
                 text: root.title;
-                color: Theme.text-primary;
+                color: Theme.text;
             }
 
             Text {
                 text: root.description;
-                color: Theme.text-secondary;
+                color: Theme.text-2;
                 font-size: 12px;
                 wrap: word-wrap;
             }
@@ -103,7 +105,181 @@ component OptionRow inherits Rectangle {
 component Divider inherits Rectangle {
     height: 1px;
     vertical-stretch: 0;
-    background: Theme.divider;
+    background: Theme.stroke;
+}
+
+component FlatButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    in property <bool> danger: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    min-height: 36px;
+    min-width: 88px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    border-radius: 10px;
+    border-width: root.primary ? 0px : 1px;
+    border-color: root.danger ? Theme.danger.transparentize(0.55) : Theme.stroke;
+    background: !root.enabled
+        ? (root.primary ? Theme.accent.transparentize(0.55) : transparent)
+        : root.primary
+            ? Theme.accent
+            : touch.pressed
+                ? Theme.pressed
+                : touch.has-hover
+                    ? Theme.hover
+                    : root.danger
+                        ? Theme.danger-soft
+                        : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+
+        Text {
+            text: root.label;
+            color: root.primary ? Theme.on-accent : root.danger ? Theme.danger : Theme.text;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            opacity: root.enabled ? 1.0 : 0.5;
+        }
+    }
+}
+
+component SegmentedOption inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    min-height: 30px;
+    border-radius: 7px;
+    border-width: root.selected ? 1px : 0px;
+    border-color: Theme.stroke;
+    background: root.selected
+        ? Theme.surface
+        : !root.enabled
+            ? transparent
+            : touch.pressed
+                ? Theme.pressed
+                : touch.has-hover
+                    ? Theme.hover
+                    : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+
+        Text {
+            text: root.label;
+            color: root.selected ? Theme.text : Theme.text-2;
+            font-size: 13px;
+            font-weight: root.selected ? 600 : 500;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            opacity: root.enabled ? 1.0 : 0.5;
+        }
+    }
+}
+
+component BackendPicker inherits Rectangle {
+    in-out property <int> current-index;
+    in property <bool> enabled: true;
+
+    height: 36px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.stroke;
+    background: Theme.surface-alt;
+
+    HorizontalLayout {
+        padding: 3px;
+        spacing: 2px;
+
+        SegmentedOption {
+            label: "vkd3d-proton";
+            selected: root.current-index != 1;
+            enabled: root.enabled;
+            clicked => {
+                root.current-index = 0;
+            }
+        }
+
+        SegmentedOption {
+            label: "DXVK";
+            selected: root.current-index == 1;
+            enabled: root.enabled;
+            clicked => {
+                root.current-index = 1;
+            }
+        }
+    }
+}
+
+component OneSwitch inherits Rectangle {
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+
+    width: 44px;
+    height: 24px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    border-radius: 12px;
+    border-width: root.checked ? 0px : 1px;
+    border-color: Theme.stroke;
+    background: root.checked ? Theme.accent : Theme.surface-alt;
+    opacity: root.enabled ? 1.0 : 0.5;
+    accessible-role: switch;
+    accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
+
+    TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.checked = !root.checked;
+        }
+    }
+
+    Rectangle {
+        x: root.checked ? parent.width - self.width - 3px : 3px;
+        y: (parent.height - self.height) / 2;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: root.checked ? Theme.on-accent : Theme.surface;
+        border-width: root.checked ? 0px : 1px;
+        border-color: Theme.stroke;
+
+        animate x {
+            duration: 120ms;
+            easing: ease-out;
+        }
+    }
 }
 
 component Chevron inherits Path {
@@ -123,8 +299,8 @@ component LogToggle inherits Rectangle {
     horizontal-stretch: 0;
     vertical-stretch: 0;
     min-height: 32px;
-    border-radius: 4px;
-    background: touch.pressed ? Theme.subtle-pressed : touch.has-hover ? Theme.subtle-hover : transparent;
+    border-radius: 8px;
+    background: touch.pressed ? Theme.pressed : touch.has-hover ? Theme.hover : transparent;
     accessible-role: button;
     accessible-label: label.text;
 
@@ -141,7 +317,8 @@ component LogToggle inherits Rectangle {
 
         label := Text {
             text: root.expanded ? "Hide log" : "Show log";
-            color: Theme.text-secondary;
+            color: Theme.text-2;
+            font-size: 13px;
             vertical-alignment: center;
         }
 
@@ -149,40 +326,8 @@ component LogToggle inherits Rectangle {
             alignment: center;
             Chevron {
                 up: root.expanded;
-                stroke: Theme.text-secondary;
+                stroke: Theme.text-2;
             }
-        }
-    }
-}
-
-component DangerButton inherits Rectangle {
-    in property <string> text;
-    callback clicked();
-
-    min-width: 96px;
-    min-height: 32px;
-    horizontal-stretch: 0;
-    vertical-stretch: 0;
-    border-radius: 4px;
-    background: touch.pressed ? #a52317 : touch.has-hover ? #b1271a : #c42b1c;
-    accessible-role: button;
-    accessible-label: root.text;
-
-    touch := TouchArea {
-        clicked => {
-            root.clicked();
-        }
-    }
-
-    HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
-
-        Text {
-            text: root.text;
-            color: #ffffff;
-            horizontal-alignment: center;
-            vertical-alignment: center;
         }
     }
 }
@@ -191,7 +336,7 @@ component ErrorIcon inherits Rectangle {
     width: 16px;
     height: 16px;
     border-radius: 8px;
-    background: Theme.critical;
+    background: Theme.danger;
 
     Path {
         width: 16px;
@@ -209,10 +354,10 @@ component LogPanel inherits Rectangle {
     in property <string> font-family;
     property <bool> follow: true;
 
-    background: Theme.log-bg;
+    background: Theme.surface-alt;
     border-width: 1px;
     border-color: Theme.stroke;
-    border-radius: 6px;
+    border-radius: 14px;
     clip: true;
 
     function stick() {
@@ -239,12 +384,12 @@ component LogPanel inherits Rectangle {
 
         VerticalLayout {
             alignment: start;
-            padding: 12px;
+            padding: 14px;
             spacing: 2px;
 
             for line in root.lines: Text {
                 text: line.text;
-                color: line.error ? Theme.critical : Theme.text-secondary;
+                color: line.error ? Theme.danger : Theme.text-2;
                 font-family: root.font-family;
                 font-size: 12px;
                 wrap: word-wrap;
@@ -254,7 +399,7 @@ component LogPanel inherits Rectangle {
 
     if root.lines.length == 0: Text {
         text: "Nothing logged yet.";
-        color: Theme.text-tertiary;
+        color: Theme.text-3;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -264,9 +409,9 @@ export component MainWindow inherits Window {
     title: "Affinity";
     icon: @image-url("../packaging/affinity-linux.svg");
     default-font-size: 14px;
-    background: Theme.window-bg;
-    min-width: 520px;
-    preferred-width: 640px;
+    background: Theme.canvas;
+    min-width: 560px;
+    preferred-width: 700px;
     min-height: page.min-height;
     preferred-height: page.preferred-height;
 
@@ -300,7 +445,7 @@ export component MainWindow inherits Window {
 
     property <bool> failed: !root.busy && root.error-text != "";
     property <string> headline: root.busy && root.status-text != "" ? root.status-text : root.state-text;
-    property <color> dot-color: root.busy ? Palette.accent-background : root.failed ? Theme.critical : root.installed ? Theme.success : Theme.text-tertiary;
+    property <color> dot-color: root.busy ? Theme.accent : root.failed ? Theme.danger : root.installed ? Theme.success : Theme.text-3;
 
     function toggle-log() {
         root.details-open = !root.details-open;
@@ -309,7 +454,7 @@ export component MainWindow inherits Window {
 
     page := VerticalLayout {
         x: (root.width - self.width) / 2;
-        width: min(root.width, 840px);
+        width: min(root.width, 860px);
         height: root.height;
         // Only the log grows; otherwise content stays at the top.
         alignment: root.details-open ? LayoutAlignment.stretch : LayoutAlignment.start;
@@ -320,19 +465,31 @@ export component MainWindow inherits Window {
         spacing: 20px;
 
         HorizontalLayout {
-            spacing: 16px;
+            spacing: 14px;
             vertical-stretch: 0;
+
+            Image {
+                source: @image-url("../packaging/affinity-linux.svg");
+                width: 42px;
+                height: 42px;
+                vertical-alignment: center;
+            }
 
             VerticalLayout {
                 alignment: center;
                 horizontal-stretch: 1;
                 spacing: 2px;
 
-                Text {
-                    text: "Affinity";
-                    color: Theme.text-primary;
-                    font-size: 20px;
-                    font-weight: 600;
+                HorizontalLayout {
+                    spacing: 8px;
+                    vertical-stretch: 0;
+
+                    Text {
+                        text: "Affinity";
+                        color: Theme.text;
+                        font-size: 22px;
+                        font-weight: 750;
+                    }
                 }
 
                 HorizontalLayout {
@@ -352,7 +509,7 @@ export component MainWindow inherits Window {
 
                     Text {
                         text: root.headline;
-                        color: root.failed ? Theme.critical : Theme.text-secondary;
+                        color: root.failed ? Theme.danger : Theme.text-2;
                         overflow: elide;
                     }
                 }
@@ -362,10 +519,10 @@ export component MainWindow inherits Window {
                 alignment: center;
                 horizontal-stretch: 0;
 
-                Button {
+                FlatButton {
                     primary: true;
-                    min-width: 120px;
-                    text: root.busy ? root.state-text : root.installed ? "Open" : "Install";
+                    min-width: 118px;
+                    label: root.busy ? root.state-text : root.installed ? "Open" : "Install";
                     enabled: !root.busy;
                     clicked => {
                         if (root.installed) {
@@ -386,7 +543,7 @@ export component MainWindow inherits Window {
             if !root.busy: Rectangle {
                 y: 1px;
                 height: 1px;
-                background: Theme.divider;
+                background: Theme.stroke;
             }
 
             if root.busy: ProgressIndicator {
@@ -398,10 +555,10 @@ export component MainWindow inherits Window {
 
         if root.failed: Rectangle {
             vertical-stretch: 0;
-            background: Theme.critical-bg;
+            background: Theme.danger-soft;
             border-width: 1px;
-            border-color: Theme.stroke;
-            border-radius: 6px;
+            border-color: Theme.danger.transparentize(0.7);
+            border-radius: 14px;
 
             HorizontalLayout {
                 padding-left: 16px;
@@ -418,15 +575,15 @@ export component MainWindow inherits Window {
 
                 Text {
                     text: root.error-text;
-                    color: Theme.text-primary;
+                    color: Theme.text;
                     wrap: word-wrap;
                     vertical-alignment: center;
                 }
 
                 if !root.details-open: VerticalLayout {
                     alignment: center;
-                    Button {
-                        text: "Show log";
+                    FlatButton {
+                        label: "Show log";
                         clicked => {
                             root.toggle-log();
                         }
@@ -439,61 +596,92 @@ export component MainWindow inherits Window {
             title: "System";
 
             Card {
-                GridLayout {
-                    padding-left: 16px;
-                    padding-right: 16px;
-                    padding-top: 12px;
-                    padding-bottom: 12px;
-                    spacing-horizontal: 24px;
-                    spacing-vertical: 8px;
+                VerticalLayout {
+                    padding-top: 4px;
+                    padding-bottom: 4px;
 
-                    Row {
-                        InfoLabel {
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 10px;
+                        padding-bottom: 10px;
+                        spacing: 24px;
+
+                        RowLabel {
                             text: "Distribution";
+                            width: 132px;
                         }
 
-                        InfoValue {
+                        RowValue {
                             text: root.distro-text;
                         }
                     }
 
-                    Row {
-                        InfoLabel {
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 10px;
+                        padding-bottom: 10px;
+                        spacing: 24px;
+
+                        RowLabel {
                             text: "Graphics";
+                            width: 132px;
                         }
 
-                        InfoValue {
+                        RowValue {
                             text: root.gpu-text;
                         }
                     }
 
-                    Row {
-                        InfoLabel {
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 10px;
+                        padding-bottom: 10px;
+                        spacing: 24px;
+
+                        RowLabel {
                             text: "Wine";
+                            width: 132px;
                         }
 
-                        InfoValue {
+                        RowValue {
                             text: root.wine-text;
                         }
                     }
 
-                    Row {
-                        InfoLabel {
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 10px;
+                        padding-bottom: 10px;
+                        spacing: 24px;
+
+                        RowLabel {
                             text: "Dependencies";
+                            width: 132px;
                         }
 
-                        InfoValue {
+                        RowValue {
                             text: root.deps-text;
-                            color: root.deps-ok ? Theme.text-primary : Theme.caution;
+                            color: root.deps-ok ? Theme.text : Theme.warning;
                         }
                     }
 
-                    Row {
-                        InfoLabel {
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 10px;
+                        padding-bottom: 10px;
+                        spacing: 24px;
+
+                        RowLabel {
                             text: "Location";
+                            width: 132px;
                         }
 
-                        InfoValue {
+                        RowValue {
                             text: root.prefix-text;
                         }
                     }
@@ -508,11 +696,9 @@ export component MainWindow inherits Window {
                 VerticalLayout {
                     OptionRow {
                         title: "Graphics backend";
-                        description: "Translates Direct3D to Vulkan.";
+                        description: "Translates Direct3D to Vulkan. vkd3d-proton is recommended.";
 
-                        ComboBox {
-                            width: 240px;
-                            model: ["vkd3d-proton (recommended)", "DXVK"];
+                        BackendPicker {
                             current-index <=> root.backend-index;
                             enabled: !root.busy;
                         }
@@ -524,8 +710,7 @@ export component MainWindow inherits Window {
                         title: "OpenCL";
                         description: "OpenCL driver for GPU utilization.";
 
-                        Switch {
-                            horizontal-stretch: 0;
+                        OneSwitch {
                             checked <=> root.opencl-enabled;
                             enabled: !root.busy;
                         }
@@ -535,7 +720,7 @@ export component MainWindow inherits Window {
 
             Text {
                 text: "Changes apply the next time you install or repair.";
-                color: Theme.text-tertiary;
+                color: Theme.text-3;
                 font-size: 12px;
                 vertical-stretch: 0;
             }
@@ -548,24 +733,25 @@ export component MainWindow inherits Window {
             if root.installed: HorizontalLayout {
                 spacing: 8px;
 
-                Button {
-                    text: "Update";
+                FlatButton {
+                    label: "Update";
                     enabled: !root.busy;
                     clicked => {
                         root.update-clicked();
                     }
                 }
 
-                Button {
-                    text: "Repair";
+                FlatButton {
+                    label: "Repair";
                     enabled: !root.busy;
                     clicked => {
                         root.repair-clicked();
                     }
                 }
 
-                Button {
-                    text: "Uninstall…";
+                FlatButton {
+                    label: "Uninstall";
+                    danger: true;
                     enabled: !root.busy;
                     clicked => {
                         root.confirm-open = true;
@@ -620,15 +806,15 @@ export component MainWindow inherits Window {
         Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            width: min(440px, parent.width - 48px);
+            width: min(460px, parent.width - 48px);
             height: dialog.preferred-height;
-            background: Theme.dialog-bg;
+            background: Theme.surface;
             border-width: 1px;
             border-color: Theme.stroke;
-            border-radius: 8px;
-            drop-shadow-blur: 32px;
-            drop-shadow-offset-y: 8px;
-            drop-shadow-color: #00000052;
+            border-radius: 18px;
+            drop-shadow-blur: 40px;
+            drop-shadow-offset-y: 12px;
+            drop-shadow-color: #00000055;
 
             dialog := VerticalLayout {
                 padding: 1px;
@@ -639,39 +825,40 @@ export component MainWindow inherits Window {
 
                     Text {
                         text: "Uninstall Affinity?";
-                        color: Theme.text-primary;
+                        color: Theme.text;
                         font-size: 20px;
-                        font-weight: 600;
+                        font-weight: 750;
                     }
 
                     Text {
                         text: "This deletes " + root.prefix-text + ", including Wine and Affinity, and removes the menu entries. Files saved outside this folder are kept.";
-                        color: Theme.text-primary;
+                        color: Theme.text;
                         wrap: word-wrap;
                     }
                 }
 
                 Rectangle {
-                    background: Theme.dialog-footer;
-                    border-bottom-left-radius: 7px;
-                    border-bottom-right-radius: 7px;
+                    background: Theme.surface-alt;
+                    border-bottom-left-radius: 17px;
+                    border-bottom-right-radius: 17px;
 
                     HorizontalLayout {
-                        padding: 24px;
+                        padding: 16px;
                         spacing: 8px;
                         alignment: end;
 
-                        DangerButton {
-                            text: "Uninstall";
+                        FlatButton {
+                            label: "Uninstall";
+                            danger: true;
                             clicked => {
                                 root.confirm-open = false;
                                 root.uninstall-clicked();
                             }
                         }
 
-                        Button {
-                            text: "Cancel";
-                            min-width: 96px;
+                        FlatButton {
+                            label: "Cancel";
+                            primary: true;
                             clicked => {
                                 root.confirm-open = false;
                             }
