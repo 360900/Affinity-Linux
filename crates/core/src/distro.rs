@@ -24,6 +24,25 @@ impl OsRelease {
         anyhow::bail!("no os-release file found")
     }
 
+    /// Construct a synthetic `OsRelease` for `Config::distro_override`.
+    pub fn from_override(value: &str) -> Self {
+        let id = value.trim().to_ascii_lowercase();
+        Self {
+            id: id.clone(),
+            id_like: Vec::new(),
+            version_id: None,
+            pretty_name: Some(value.trim().to_string()),
+        }
+    }
+
+    /// Return `from_override` when an override is configured, else `detect()`.
+    pub fn detect_with_override(distro_override: Option<&str>) -> Result<Self> {
+        match distro_override.filter(|value| !value.trim().is_empty()) {
+            Some(over) => Ok(Self::from_override(over)),
+            None => Self::detect(),
+        }
+    }
+
     pub fn parse(text: &str) -> Self {
         let mut os = Self::default();
         for line in text.lines() {

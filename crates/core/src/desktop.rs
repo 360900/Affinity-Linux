@@ -1,6 +1,7 @@
 //! Application menu entry, affinity:// handler and protocol registry fix.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -10,7 +11,7 @@ use anyhow::{Context, Result};
 use crate::deps::which;
 use crate::journal::Report;
 use crate::runner::{self, RunOptions, Stream};
-use crate::{APP_NAME, WINE_DIR_NAME};
+use crate::{APP_NAME, WINE_DIR_NAME, wine};
 
 pub const URL_HANDLER_FILE: &str = "affinity-url-handler.desktop";
 
@@ -49,13 +50,11 @@ where
     } else {
         fs::create_dir_all(&applications)?;
         fs::write(&desktop, &contents).with_context(|| format!("writing {}", desktop.display()))?;
-        let shortcut = home_dir()?.join("Desktop").join("Affinity.desktop");
-        if shortcut
-            .parent()
-            .map(|parent| parent.is_dir())
-            .unwrap_or(false)
-        {
-            let _ = fs::copy(&desktop, &shortcut);
+        if let Some(desktop_folder) = desktop_dir().filter(|dir| dir.is_dir()) {
+            let shortcut = desktop_folder.join("Affinity.desktop");
+            if fs::copy(&desktop, &shortcut).is_ok() {
+                let _ = fs::set_permissions(&shortcut, fs::Permissions::from_mode(0o755));
+            }
         }
     }
 
@@ -76,19 +75,19 @@ where
 
 fn desktop_contents(prefix: &Path, exec: &str) -> String {
     let icon = "applications-graphics";
+    let path_value = escape_desktop_string(&prefix.display().to_string());
     format!(
         "[Desktop Entry]\n\
          Name=Affinity Suite\n\
          Comment=Affinity v3 creative suite\n\
          Icon={icon}\n\
-         Path={}\n\
+         Path={path_value}\n\
          Exec={exec}\n\
          Terminal=false\n\
          Type=Application\n\
          Categories=Graphics;\n\
          StartupNotify=true\n\
-         StartupWMClass=affinity.exe\n",
-        prefix.display()
+         StartupWMClass=affinity.exe\n"
     )
 }
 
@@ -103,12 +102,37 @@ fn exec_line(prefix: &Path) -> String {
 }
 
 fn launcher() -> Option<PathBuf> {
-    // AppRun forwards any arguments to the CLI.
+    let current = std::env::current_exe().ok();
+    // AppRun forwards any arguments to the CLI. Only trust an AppImage that is
+    // this project: other AppImages in the environment set APPIMAGE too.
     if let Some(appimage) = std::env::var_os("APPIMAGE") {
-        return Some(PathBuf::from(appimage));
+        let path = PathBuf::from(appimage);
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let mounted = current
+            .as_ref()
+            .map(|exe| exe.to_string_lossy().contains(".mount_"))
+            .unwrap_or(false);
+        if name.contains("affinity_linux") || name.contains("affinity-linux") || mounted {
+            return Some(path);
+        }
     }
-    let cli = std::env::current_exe().ok()?.with_file_name(APP_NAME);
-    cli.is_file().then_some(cli)
+    if let Some(current) = current {
+        let cli = current.with_file_name(APP_NAME);
+        if cli.is_file() {
+            return Some(cli);
+        }
+        if current
+            .file_name()
+            .map(|name| name == APP_NAME)
+            .unwrap_or(false)
+        {
+            return Some(current);
+        }
+    }
+    which(APP_NAME)
 }
 
 fn launcher_exec(cli: &Path, prefix: &Path) -> String {
@@ -172,23 +196,31 @@ fn register_url_handler(
             |stream, line| report.line(stream, line),
         );
     }
+    let mut registered = false;
     if which("xdg-mime").is_some() {
         let mut cmd = Command::new("xdg-mime");
         cmd.args(["default", URL_HANDLER_FILE, "x-scheme-handler/affinity"]);
-        let _ = runner::run(
+        match runner::run(
             cmd,
             RunOptions::default().stall(Duration::from_secs(60)),
             |stream, line| report.line(stream, line),
-        );
+        ) {
+            Ok(result) if result.success() => registered = true,
+            Ok(result) => report.warn(format!(
+                "xdg-mime default {URL_HANDLER_FILE} failed ({})",
+                result.status
+            )),
+            Err(error) => report.warn(format!("xdg-mime default failed: {error}")),
+        }
     } else {
         report.warn("xdg-mime is missing; cannot make the affinity:// handler the default");
     }
 
     let wine_entry = applications.join("wine-protocol-affinity.desktop");
-    if wine_entry.exists() {
+    if wine_entry.symlink_metadata().is_ok() {
         let _ = fs::remove_file(wine_entry);
     }
-    Ok(true)
+    Ok(registered)
 }
 
 fn fix_protocol_registry(opts: &DesktopOptions, report: &mut Report<'_>) -> Result<()> {
@@ -200,9 +232,10 @@ fn fix_protocol_registry(opts: &DesktopOptions, report: &mut Report<'_>) -> Resu
     {
         return Ok(());
     }
-    let wine = opts.prefix.join(WINE_DIR_NAME).join("bin/wine");
+    let wine_dir = opts.prefix.join(WINE_DIR_NAME);
+    let wine_bin = wine_dir.join("bin/wine");
     let target = "\"C:\\Program Files\\Affinity\\Affinity\\Affinity.exe\" \"%1\"";
-    let mut cmd = Command::new(&wine);
+    let mut cmd = Command::new(&wine_bin);
     cmd.args([
         "reg",
         "add",
@@ -216,15 +249,14 @@ fn fix_protocol_registry(opts: &DesktopOptions, report: &mut Report<'_>) -> Resu
         report.info(format!(
             "    WINEPREFIX={} {} reg add HKEY_CLASSES_ROOT\\affinity\\shell\\open\\command /ve /d {} /f",
             opts.prefix.display(),
-            wine.display(),
+            wine_bin.display(),
             quote(target)
         ));
         return Ok(());
     }
 
     let mut options = RunOptions::default().stall(Duration::from_secs(120));
-    options = options.env("WINEPREFIX", opts.prefix.display().to_string());
-    options = options.env("WINEDEBUG", "-all");
+    options.envs = wine::wine_env(&opts.prefix, &wine_dir, "-all");
     let result = runner::run(cmd, options, |stream, line| report.line(stream, line))?;
     if !result.success() {
         report.warn("could not point HKCR\\affinity at the v3 executable");
@@ -265,21 +297,97 @@ fn applications_dir() -> Result<PathBuf> {
     Ok(data.join("applications"))
 }
 
+/// Resolve the user's desktop directory via XDG user-dirs, falling back to `~/Desktop`.
+pub(crate) fn desktop_dir() -> Option<PathBuf> {
+    if which("xdg-user-dir").is_some()
+        && let Ok(output) = Command::new("xdg-user-dir").arg("DESKTOP").output()
+        && output.status.success()
+    {
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !value.is_empty() {
+            let path = PathBuf::from(&value);
+            if home_dir().ok().as_deref() != Some(path.as_path()) {
+                return Some(path);
+            }
+        }
+    }
+    let home = home_dir().ok()?;
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    if let Ok(text) = fs::read_to_string(config_home.join("user-dirs.dirs"))
+        && let Some(dir) = parse_user_dir(&text, "XDG_DESKTOP_DIR", &home)
+    {
+        return Some(dir);
+    }
+    Some(home.join("Desktop"))
+}
+
+fn parse_user_dir(text: &str, key: &str, home: &Path) -> Option<PathBuf> {
+    let prefix = format!("{key}=");
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(raw) = line.strip_prefix(&prefix) else {
+            continue;
+        };
+        let value = raw.trim().trim_matches('"');
+        if value.is_empty() {
+            return None;
+        }
+        let path = if let Some(rest) = value.strip_prefix("$HOME/") {
+            home.join(rest)
+        } else if value == "$HOME" {
+            return None;
+        } else {
+            PathBuf::from(value)
+        };
+        return Some(path);
+    }
+    None
+}
+
 fn home_dir() -> Result<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .context("HOME is not set")
 }
 
+/// Escape a `.desktop` string value (general string escaping).
+fn escape_desktop_string(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+/// Quote a single argument for a `.desktop` `Exec=` line per the Freedesktop
+/// Desktop Entry Specification.
 fn quote(text: &str) -> String {
-    if text
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "-_./:=@+".contains(c))
+    let escaped_percent = text.replace('%', "%%");
+    if !escaped_percent.is_empty()
+        && escaped_percent
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@+%".contains(c))
     {
-        text.to_string()
-    } else {
-        format!("\"{}\"", text.replace('"', "\\\""))
+        return escaped_percent;
     }
+    let mut out = String::with_capacity(escaped_percent.len() + 2);
+    out.push('"');
+    for ch in escaped_percent.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\\\\\"),
+            '"' => out.push_str("\\\\\""),
+            '`' => out.push_str("\\\\`"),
+            '$' => out.push_str("\\\\$"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
@@ -292,11 +400,30 @@ mod tests {
         let app = dir.path().join("drive_c/Program Files/Affinity/Affinity");
         fs::create_dir_all(&app).unwrap();
         fs::write(app.join("Affinity.exe"), b"exe").unwrap();
-        assert!(exec_line(dir.path()).contains("Affinity.exe"));
-        assert!(!exec_line(dir.path()).contains("AffinityHook.exe"));
+        assert!(wine_exec_line(dir.path()).contains("Affinity.exe"));
+        assert!(!wine_exec_line(dir.path()).contains("AffinityHook.exe"));
 
         fs::write(app.join("AffinityHook.exe"), b"hook").unwrap();
-        assert!(exec_line(dir.path()).contains("AffinityHook.exe"));
+        assert!(wine_exec_line(dir.path()).contains("AffinityHook.exe"));
+    }
+
+    #[test]
+    fn quote_escapes_desktop_exec_characters() {
+        assert_eq!(quote("/home/me/100%"), "/home/me/100%%");
+        assert_eq!(
+            quote("/home/me/My $Dir \"a\"\\b"),
+            "\"/home/me/My \\\\$Dir \\\\\"a\\\\\"\\\\\\\\b\""
+        );
+    }
+
+    #[test]
+    fn parses_localized_desktop_dir() {
+        let home = Path::new("/home/me");
+        let text = "# comment\nXDG_DESKTOP_DIR=\"$HOME/Schreibtisch\"\n";
+        assert_eq!(
+            parse_user_dir(text, "XDG_DESKTOP_DIR", home),
+            Some(PathBuf::from("/home/me/Schreibtisch"))
+        );
     }
 
     #[test]

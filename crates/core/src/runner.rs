@@ -5,15 +5,18 @@
 
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
 const TAIL_LINES: usize = 200;
+const MAX_LINE_BYTES: usize = 64 * 1024;
 const EXIT_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +39,8 @@ pub struct RunOptions {
     pub echo: bool,
     /// Let the child use the terminal's stdin (needed for sudo password prompts).
     pub inherit_stdin: bool,
+    /// Optional cancellation flag; when set, the child is killed promptly.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for RunOptions {
@@ -48,6 +53,7 @@ impl Default for RunOptions {
             cwd: None,
             echo: true,
             inherit_stdin: false,
+            cancel: None,
         }
     }
 }
@@ -93,19 +99,25 @@ impl RunOptions {
         self.echo = false;
         self
     }
+
+    pub fn cancel(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancel = Some(flag);
+        self
+    }
 }
 
 #[derive(Debug)]
 pub struct RunResult {
     pub status: ExitStatus,
     pub stalled: bool,
+    pub cancelled: bool,
     pub stdout_tail: Vec<String>,
     pub stderr_tail: Vec<String>,
 }
 
 impl RunResult {
     pub fn success(&self) -> bool {
-        self.status.success() && !self.stalled
+        self.status.success() && !self.stalled && !self.cancelled
     }
 
     /// Last lines of stderr (falling back to stdout) for error messages.
@@ -183,6 +195,7 @@ where
     let mut stderr_tail = VecDeque::new();
     let mut last_output = Instant::now();
     let mut stalled = false;
+    let mut cancelled = false;
     let mut status: Option<ExitStatus> = None;
     let mut finished_at: Option<Instant> = None;
     let mut disconnected = false;
@@ -213,6 +226,19 @@ where
         }
 
         if status.is_none()
+            && !cancelled
+            && opts
+                .cancel
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            cancelled = true;
+            let _ = child.kill();
+        }
+
+        if status.is_none()
+            && !stalled
+            && !cancelled
             && let Some(limit) = opts.stall_timeout
             && last_output.elapsed() >= limit
         {
@@ -247,6 +273,7 @@ where
     Ok(RunResult {
         status: status.expect("status set above"),
         stalled,
+        cancelled,
         stdout_tail: stdout_tail.into(),
         stderr_tail: stderr_tail.into(),
     })
@@ -257,18 +284,73 @@ where
     R: Read + Send + 'static,
 {
     std::thread::spawn(move || {
-        let reader = BufReader::new(reader);
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    if tx.send((stream, line)).is_err() {
-                        break;
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        let mut last_was_cr = false;
+
+        loop {
+            let chunk = match reader.fill_buf() {
+                Ok([]) => break,
+                Ok(buf) => buf,
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            let len = chunk.len();
+            let mut stopped = false;
+
+            for &byte in chunk {
+                match byte {
+                    b'\r' => {
+                        if send_line(&tx, stream, &mut line).is_err() {
+                            stopped = true;
+                            break;
+                        }
+                        last_was_cr = true;
+                    }
+                    b'\n' => {
+                        if last_was_cr && line.is_empty() {
+                            last_was_cr = false;
+                            continue;
+                        }
+                        if send_line(&tx, stream, &mut line).is_err() {
+                            stopped = true;
+                            break;
+                        }
+                        last_was_cr = false;
+                    }
+                    _ => {
+                        last_was_cr = false;
+                        line.push(byte);
+                        if line.len() >= MAX_LINE_BYTES
+                            && send_line(&tx, stream, &mut line).is_err()
+                        {
+                            stopped = true;
+                            break;
+                        }
                     }
                 }
-                Err(_) => break,
+            }
+
+            reader.consume(len);
+            if stopped {
+                return;
             }
         }
+
+        if !line.is_empty() {
+            let _ = send_line(&tx, stream, &mut line);
+        }
     });
+}
+
+fn send_line(
+    tx: &Sender<(Stream, String)>,
+    stream: Stream,
+    buf: &mut Vec<u8>,
+) -> std::result::Result<(), ()> {
+    let text = String::from_utf8_lossy(buf).into_owned();
+    buf.clear();
+    tx.send((stream, text)).map_err(|_| ())
 }
 
 fn emit_line<F>(
@@ -368,5 +450,52 @@ mod tests {
         let result = run(sh("exit 3"), RunOptions::default().quiet(), |_, _| {}).unwrap();
         assert!(!result.success());
         assert_eq!(result.status.code(), Some(3));
+    }
+
+    #[test]
+    fn handles_non_utf8_output() {
+        let mut lines = Vec::new();
+        let result = run(
+            sh("printf 'bad\\377byte\\nafter\\n'"),
+            RunOptions::default(),
+            |_, line| lines.push(line.to_string()),
+        )
+        .unwrap();
+        assert!(result.success());
+        assert!(lines.iter().any(|line| line.contains("bad")));
+        assert!(lines.iter().any(|line| line == "after"));
+    }
+
+    #[test]
+    fn splits_carriage_return_progress_lines() {
+        let mut lines = Vec::new();
+        let result = run(
+            sh("printf '10%%\\r50%%\\r100%%\\r\\ndone\\n'"),
+            RunOptions::default(),
+            |_, line| lines.push(line.to_string()),
+        )
+        .unwrap();
+        assert!(result.success());
+        assert_eq!(lines, vec!["10%", "50%", "100%", "done"]);
+    }
+
+    #[test]
+    fn cancel_flag_stops_child() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let trigger = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            trigger.store(true, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        let result = run(
+            sh("sleep 10"),
+            RunOptions::default().quiet().cancel(cancel),
+            |_, _| {},
+        )
+        .unwrap();
+        assert!(result.cancelled);
+        assert!(!result.success());
+        assert!(started.elapsed() < Duration::from_secs(6));
     }
 }

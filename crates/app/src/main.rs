@@ -5,20 +5,19 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
 
-use affinity_linux_core::app_exe;
-use affinity_linux_core::backends;
-use affinity_linux_core::config::{Config, GpuBackend, default_prefix};
+use affinity_linux_core::config::{Config, GpuBackend, default_prefix, validate_prefix};
 use affinity_linux_core::deps;
-use affinity_linux_core::distro::OsRelease;
 use affinity_linux_core::doctor::{self, DoctorReport};
 use affinity_linux_core::gpu::{self, Vendor};
-use affinity_linux_core::install;
+use affinity_linux_core::install::{self, SetupOptions};
 use affinity_linux_core::launch;
 use affinity_linux_core::manifest::now_epoch;
-use affinity_linux_core::packages::{self, Elevation, PlanRunOptions};
+use affinity_linux_core::packages::{self, Elevation};
 use affinity_linux_core::runner::Stream;
 use affinity_linux_core::uninstall;
 use affinity_linux_core::wine;
@@ -27,8 +26,12 @@ use slint::{ComponentHandle, LogicalSize, Model, VecModel};
 
 enum UiEvent {
     Doctor(Box<DoctorReport>),
-    Log(String, bool),
-    JobDone(&'static str),
+    Log {
+        text: String,
+        error: bool,
+        status: bool,
+    },
+    JobDone(&'static str, Vec<String>),
     JobFailed(&'static str, String),
 }
 
@@ -68,6 +71,9 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            if ui.get_busy() {
+                return;
+            }
             let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
             let (backend, opencl) = selected_options(&ui);
             let display = display_info(&ui);
@@ -83,6 +89,9 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            if ui.get_busy() {
+                return;
+            }
             let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
             start_job(&ui, "Opening…");
             spawn_launch(cfg, tx.clone());
@@ -96,6 +105,9 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            if ui.get_busy() {
+                return;
+            }
             let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
             start_job(&ui, "Updating…");
             spawn_update(cfg, tx.clone());
@@ -109,6 +121,9 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            if ui.get_busy() {
+                return;
+            }
             let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
             let (backend, opencl) = selected_options(&ui);
             let display = display_info(&ui);
@@ -124,6 +139,9 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            if ui.get_busy() {
+                return;
+            }
             let cfg = Config::load().unwrap_or_else(|_| cfg.clone());
             start_job(&ui, "Uninstalling…");
             spawn_uninstall(cfg, tx.clone());
@@ -168,23 +186,36 @@ fn main() -> Result<(), slint::PlatformError> {
                         keep_state = false;
                         fit_window(&ui);
                     }
-                    UiEvent::Log(text, error) => {
-                        if !error {
+                    UiEvent::Log {
+                        text,
+                        error,
+                        status,
+                    } => {
+                        if status && !error {
                             ui.set_status_text(text.clone().into());
                         }
                         push_log(&logs, text, error);
                     }
-                    UiEvent::JobDone(kind) => {
+                    UiEvent::JobDone(kind, failures) => {
                         ui.set_busy(false);
-                        ui.set_state_text(done_state(kind).into());
                         ui.set_status_text("".into());
                         match kind {
                             "install" => ui.set_installed(true),
                             "uninstall" => ui.set_installed(false),
                             _ => {}
                         }
-                        keep_state = kind != "install";
-                        push_log(&logs, format!("{kind}: finished"), false);
+                        if failures.is_empty() {
+                            ui.set_state_text(done_state(kind).into());
+                            keep_state = kind != "install";
+                            push_log(&logs, format!("{kind}: finished"), false);
+                        } else {
+                            let summary = format!("Completed with issues: {}", failures.join(", "));
+                            ui.set_state_text(warn_state(kind).into());
+                            ui.set_error_text(summary.clone().into());
+                            keep_state = true;
+                            push_log(&logs, summary, true);
+                            fit_window(&ui);
+                        }
                         spawn_doctor(Config::load().unwrap_or_default(), tx.clone());
                     }
                     UiEvent::JobFailed(kind, message) => {
@@ -239,41 +270,6 @@ fn display_info(ui: &MainWindow) -> DisplayInfo {
     }
 }
 
-/// Installs the OpenCL driver for the GPU Affinity renders on, if missing.
-/// Optional: a failure is logged and the job continues.
-fn install_opencl_driver(
-    os: &OsRelease,
-    prefix: &Path,
-    tx: &Sender<UiEvent>,
-    log_path: &Path,
-    send: &mut dyn FnMut(Stream, &str),
-) {
-    let plan = packages::opencl_plan(os, gpu::render_vendor(prefix));
-    for note in &plan.notes {
-        job_info(tx, log_path, format!("OpenCL: {note}"));
-    }
-    if plan.steps.is_empty() {
-        return;
-    }
-    let elevation = if packages::is_root() {
-        Elevation::None
-    } else {
-        Elevation::Pkexec
-    };
-    let options = PlanRunOptions {
-        dry_run: false,
-        elevation,
-        log_path: Some(log_path.to_path_buf()),
-    };
-    if let Err(error) = packages::run_plan(&plan, &options, send) {
-        job_warn(
-            tx,
-            log_path,
-            format!("warning: OpenCL driver install failed: {error:#}"),
-        );
-    }
-}
-
 /// Picks the Wine DPI for the display and logs how it was chosen.
 fn display_dpi(display: DisplayInfo, tx: &Sender<UiEvent>, log_path: &Path) -> u32 {
     let x = wine::detect_x_scaling();
@@ -310,6 +306,15 @@ fn done_state(kind: &str) -> &'static str {
         "launch" => "Started. It may take a moment to appear.",
         "uninstall" => "Uninstalled",
         _ => "Done",
+    }
+}
+
+fn warn_state(kind: &str) -> &'static str {
+    match kind {
+        "install" => "Installed with warnings",
+        "update" => "Updated with warnings",
+        "repair" => "Repaired with warnings",
+        _ => "Finished with warnings",
     }
 }
 
@@ -388,6 +393,14 @@ fn spawn_doctor(cfg: Config, tx: Sender<UiEvent>) {
     });
 }
 
+fn default_elevation() -> Elevation {
+    if packages::is_root() {
+        Elevation::None
+    } else {
+        Elevation::Pkexec
+    }
+}
+
 fn spawn_install(
     cfg: Config,
     backend: GpuBackend,
@@ -396,166 +409,110 @@ fn spawn_install(
     tx: Sender<UiEvent>,
 ) {
     std::thread::spawn(move || {
-        let log_path = job_log(&cfg.prefix, "install");
-        match install_all(&cfg, backend, opencl, display, &log_path, &tx) {
-            Ok(()) => {
-                let _ = tx.send(UiEvent::JobDone("install"));
+        let prefix = cfg.prefix.clone();
+        let log_path = job_log(&prefix, "install");
+        let result = (|| -> anyhow::Result<Vec<String>> {
+            validate_prefix(&prefix)?;
+            fs::create_dir_all(prefix.join("logs"))?;
+            let mut send = |stream: Stream, line: &str| {
+                let _ = tx.send(UiEvent::Log {
+                    text: line.to_string(),
+                    error: matches!(stream, Stream::Stderr),
+                    status: true,
+                });
+            };
+            let cancel_prefetch = Arc::new(AtomicBool::new(false));
+            let prefetch = {
+                let tx = tx.clone();
+                let log_path = log_path.clone();
+                let cancel = cancel_prefetch.clone();
+                std::thread::spawn(move || {
+                    install::prefetch_cancellable(
+                        Some(log_path),
+                        true,
+                        Some(cancel),
+                        |stream, line| {
+                            let _ = tx.send(UiEvent::Log {
+                                text: line.to_string(),
+                                error: matches!(stream, Stream::Stderr),
+                                status: false,
+                            });
+                        },
+                    );
+                })
+            };
+            let dpi = display_dpi(display, &tx, &log_path);
+            let report = install::install(
+                &SetupOptions {
+                    prefix: prefix.clone(),
+                    installer: None,
+                    backend,
+                    opencl,
+                    dpi: Some(dpi),
+                    dry_run: false,
+                    log_path: Some(log_path.clone()),
+                    install_deps: true,
+                    skip_wine: false,
+                    elevation: default_elevation(),
+                    distro_override: cfg.distro_override.clone(),
+                },
+                &mut send,
+            );
+            cancel_prefetch.store(true, Ordering::Relaxed);
+            let _ = prefetch.join();
+            let report = report?;
+
+            let mut saved = cfg.clone();
+            saved.gpu_backend = backend;
+            saved.set_opencl(opencl, gpu::render_vendor(&prefix));
+            saved.save()?;
+            Ok(report.failures)
+        })();
+        match result {
+            Ok(failures) => {
+                let _ = tx.send(UiEvent::JobDone("install", failures));
             }
             Err(error) => job_failed(&tx, "install", &log_path, &error),
         }
     });
 }
 
-fn install_all(
-    cfg: &Config,
-    backend: GpuBackend,
-    opencl: bool,
-    display: DisplayInfo,
-    log_path: &Path,
-    tx: &Sender<UiEvent>,
-) -> anyhow::Result<()> {
-    let prefix = cfg.prefix.clone();
-    fs::create_dir_all(prefix.join("logs"))?;
-    let log_path = log_path.to_path_buf();
-    let os = OsRelease::detect()?;
-    let prefetch = {
-        let tx = tx.clone();
-        let log_path = log_path.clone();
-        std::thread::spawn(move || {
-            install::prefetch(Some(log_path), true, |stream, line| {
-                let _ = tx.send(UiEvent::Log(
-                    line.to_string(),
-                    matches!(stream, Stream::Stderr),
-                ));
-            });
-        })
-    };
-    let mut send = |stream: Stream, line: &str| {
-        let _ = tx.send(UiEvent::Log(
-            line.to_string(),
-            matches!(stream, Stream::Stderr),
-        ));
-    };
-
-    let checks = deps::check_all();
-    let missing = deps::missing(&checks);
-    if !missing.is_empty() {
-        let plan = packages::plan(&os);
-        if plan.steps.is_empty() {
-            job_warn(
-                tx,
-                &log_path,
-                format!(
-                    "warning: no automatic dependency plan; missing: {}",
-                    missing
-                        .iter()
-                        .map(|dep| dep.command)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            );
-        } else {
-            let elevation = if packages::is_root() {
-                Elevation::None
-            } else {
-                Elevation::Pkexec
-            };
-            let options = PlanRunOptions {
-                dry_run: false,
-                elevation,
-                log_path: Some(log_path.clone()),
-            };
-            packages::run_plan(&plan, &options, &mut send)?;
-        }
-    }
-
-    if opencl {
-        install_opencl_driver(&os, &prefix, tx, &log_path, &mut send);
-    }
-
-    let dpi = display_dpi(display, tx, &log_path);
-
-    let setup = wine::SetupOptions {
-        prefix: prefix.clone(),
-        family: os.family(),
-        dry_run: false,
-        log_path: Some(log_path.clone()),
-        wine_version: None,
-        dpi: Some(dpi),
-    };
-    wine::setup(&setup, &mut send)?;
-
-    let backend_options = backends::BackendOptions {
-        prefix: prefix.clone(),
-        backend,
-        dry_run: false,
-        log_path: Some(log_path.clone()),
-    };
-    if let Err(error) = backends::install(&backend_options, &mut send) {
-        job_warn(
-            tx,
-            &log_path,
-            format!("warning: GPU backend setup failed: {error:#}"),
-        );
-    }
-
-    let install_options = install::InstallOptions {
-        prefix: prefix.clone(),
-        installer: None,
-        dry_run: false,
-        log_path: Some(log_path),
-    };
-    let _ = prefetch.join();
-    install::install(&install_options, &mut send)?;
-
-    let mut saved = cfg.clone();
-    saved.gpu_backend = backend;
-    saved.set_opencl(opencl, gpu::render_vendor(&prefix));
-    saved.save()?;
-    Ok(())
-}
-
-fn ensure_installed(prefix: &Path) -> anyhow::Result<()> {
-    if !app_exe(prefix).exists() {
-        anyhow::bail!(
-            "Affinity is not installed in {}; run the installer again",
-            prefix.display()
-        );
-    }
-    let registry = fs::read_to_string(prefix.join("system.reg")).unwrap_or_default();
-    if !wine::has_dotnet48(&registry) {
-        anyhow::bail!(".NET Framework 4.8 is missing from the prefix; reinstall Affinity");
-    }
-    Ok(())
-}
-
 fn spawn_update(cfg: Config, tx: Sender<UiEvent>) {
     std::thread::spawn(move || {
         let prefix = cfg.prefix.clone();
         let log_path = job_log(&prefix, "update");
-        let result = (|| -> anyhow::Result<()> {
-            ensure_installed(&prefix)?;
-            if let Some(parent) = log_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
+        let result = (|| -> anyhow::Result<Vec<String>> {
+            validate_prefix(&prefix)?;
+            install::ensure_installed(&prefix)?;
+            fs::create_dir_all(prefix.join("logs"))?;
             let mut send = |stream: Stream, line: &str| {
-                let _ = tx.send(UiEvent::Log(
-                    line.to_string(),
-                    matches!(stream, Stream::Stderr),
-                ));
+                let _ = tx.send(UiEvent::Log {
+                    text: line.to_string(),
+                    error: matches!(stream, Stream::Stderr),
+                    status: true,
+                });
             };
-            let options = install::InstallOptions {
-                prefix,
-                installer: None,
-                dry_run: false,
-                log_path: Some(log_path.clone()),
-            };
-            install::install(&options, &mut send)?;
-            Ok(())
+            let report = install::update(
+                &SetupOptions {
+                    prefix,
+                    installer: None,
+                    backend: cfg.gpu_backend,
+                    opencl: false,
+                    dpi: None,
+                    dry_run: false,
+                    log_path: Some(log_path.clone()),
+                    install_deps: false,
+                    skip_wine: true,
+                    elevation: default_elevation(),
+                    distro_override: cfg.distro_override.clone(),
+                },
+                &mut send,
+            )?;
+            Ok(report.failures)
         })();
         match result {
-            Ok(()) => {
-                let _ = tx.send(UiEvent::JobDone("update"));
+            Ok(failures) => {
+                let _ = tx.send(UiEvent::JobDone("update", failures));
             }
             Err(error) => job_failed(&tx, "update", &log_path, &error),
         }
@@ -572,60 +529,43 @@ fn spawn_repair(
     std::thread::spawn(move || {
         let prefix = cfg.prefix.clone();
         let log_path = job_log(&prefix, "repair");
-        let result = (|| -> anyhow::Result<()> {
-            ensure_installed(&prefix)?;
-            if let Some(parent) = log_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
+        let result = (|| -> anyhow::Result<Vec<String>> {
+            validate_prefix(&prefix)?;
+            install::ensure_installed(&prefix)?;
+            fs::create_dir_all(prefix.join("logs"))?;
             let mut send = |stream: Stream, line: &str| {
-                let _ = tx.send(UiEvent::Log(
-                    line.to_string(),
-                    matches!(stream, Stream::Stderr),
-                ));
+                let _ = tx.send(UiEvent::Log {
+                    text: line.to_string(),
+                    error: matches!(stream, Stream::Stderr),
+                    status: true,
+                });
             };
             let dpi = display_dpi(display, &tx, &log_path);
-            if let Err(error) =
-                wine::apply_dpi(&prefix, dpi, false, Some(log_path.clone()), &mut send)
-            {
-                job_warn(
-                    &tx,
-                    &log_path,
-                    format!("warning: could not set the Wine DPI: {error:#}"),
-                );
-            }
-            let backend_options = backends::BackendOptions {
-                prefix: prefix.clone(),
-                backend,
-                dry_run: false,
-                log_path: Some(log_path.clone()),
-            };
-            if let Err(error) = backends::install(&backend_options, &mut send) {
-                job_warn(
-                    &tx,
-                    &log_path,
-                    format!("warning: GPU backend setup failed: {error:#}"),
-                );
-            }
-            let options = install::InstallOptions {
-                prefix,
-                installer: None,
-                dry_run: false,
-                log_path: Some(log_path.clone()),
-            };
-            install::repair(&options, &mut send)?;
-            if opencl {
-                let os = OsRelease::detect()?;
-                install_opencl_driver(&os, &cfg.prefix, &tx, &log_path, &mut send);
-            }
+            let report = install::repair(
+                &SetupOptions {
+                    prefix: prefix.clone(),
+                    installer: None,
+                    backend,
+                    opencl,
+                    dpi: Some(dpi),
+                    dry_run: false,
+                    log_path: Some(log_path.clone()),
+                    install_deps: false,
+                    skip_wine: true,
+                    elevation: default_elevation(),
+                    distro_override: cfg.distro_override.clone(),
+                },
+                &mut send,
+            )?;
             let mut saved = cfg.clone();
             saved.gpu_backend = backend;
-            saved.set_opencl(opencl, gpu::render_vendor(&cfg.prefix));
+            saved.set_opencl(opencl, gpu::render_vendor(&prefix));
             saved.save()?;
-            Ok(())
+            Ok(report.failures)
         })();
         match result {
-            Ok(()) => {
-                let _ = tx.send(UiEvent::JobDone("repair"));
+            Ok(failures) => {
+                let _ = tx.send(UiEvent::JobDone("repair", failures));
             }
             Err(error) => job_failed(&tx, "repair", &log_path, &error),
         }
@@ -635,27 +575,36 @@ fn spawn_repair(
 fn spawn_launch(cfg: Config, tx: Sender<UiEvent>) {
     std::thread::spawn(move || {
         let prefix = cfg.prefix.clone();
-        let log_path = job_log(&prefix, "launch");
-        let options = launch::LaunchOptions {
-            prefix,
-            args: Vec::new(),
-            dry_run: false,
-            log_path: Some(log_path.clone()),
-            wayland: false,
-        };
-        let mut send = |stream: Stream, line: &str| {
-            let _ = tx.send(UiEvent::Log(
-                line.to_string(),
-                matches!(stream, Stream::Stderr),
-            ));
-        };
-        match launch::launch(&options, &mut send) {
+        let log_path = prefix.join("logs/launch.log");
+        let result = (|| -> anyhow::Result<launch::LaunchOutcome> {
+            validate_prefix(&prefix)?;
+            install::ensure_installed(&prefix)?;
+            fs::create_dir_all(prefix.join("logs"))?;
+            let _ = fs::write(&log_path, b"");
+            let options = launch::LaunchOptions {
+                prefix,
+                args: Vec::new(),
+                dry_run: false,
+                log_path: Some(log_path.clone()),
+                wayland: false,
+            };
+            let mut send = |stream: Stream, line: &str| {
+                let _ = tx.send(UiEvent::Log {
+                    text: line.to_string(),
+                    error: matches!(stream, Stream::Stderr),
+                    status: true,
+                });
+            };
+            launch::launch(&options, &mut send)
+        })();
+        match result {
             Ok(outcome) => {
-                let _ = tx.send(UiEvent::Log(
-                    format!("launched {}", outcome.target.display()),
-                    false,
-                ));
-                let _ = tx.send(UiEvent::JobDone("launch"));
+                let _ = tx.send(UiEvent::Log {
+                    text: format!("launched {}", outcome.target.display()),
+                    error: false,
+                    status: true,
+                });
+                let _ = tx.send(UiEvent::JobDone("launch", Vec::new()));
             }
             Err(error) => job_failed(&tx, "launch", &log_path, &error),
         }
@@ -665,33 +614,39 @@ fn spawn_launch(cfg: Config, tx: Sender<UiEvent>) {
 fn spawn_uninstall(cfg: Config, tx: Sender<UiEvent>) {
     std::thread::spawn(move || {
         let prefix = cfg.prefix.clone();
-        let log_path = job_log(&prefix, "uninstall");
+        let log_path = cache_log("uninstall");
         let options = uninstall::UninstallOptions {
             prefix,
             dry_run: false,
             log_path: Some(log_path.clone()),
         };
         let mut send = |stream: Stream, line: &str| {
-            let _ = tx.send(UiEvent::Log(
-                line.to_string(),
-                matches!(stream, Stream::Stderr),
-            ));
+            let _ = tx.send(UiEvent::Log {
+                text: line.to_string(),
+                error: matches!(stream, Stream::Stderr),
+                status: true,
+            });
         };
         match uninstall::uninstall(&options, &mut send) {
             Ok(outcome) => {
                 let mut saved = cfg.clone();
                 saved.prefix = default_prefix();
                 if let Err(error) = saved.save() {
-                    let _ = tx.send(UiEvent::Log(format!("warning: {error:#}"), true));
+                    let _ = tx.send(UiEvent::Log {
+                        text: format!("warning: {error:#}"),
+                        error: true,
+                        status: false,
+                    });
                 }
-                let _ = tx.send(UiEvent::Log(
-                    format!(
+                let _ = tx.send(UiEvent::Log {
+                    text: format!(
                         "removed {} desktop entries, prefix removed={}",
                         outcome.removed_entries, outcome.prefix_removed
                     ),
-                    false,
-                ));
-                let _ = tx.send(UiEvent::JobDone("uninstall"));
+                    error: false,
+                    status: true,
+                });
+                let _ = tx.send(UiEvent::JobDone("uninstall", Vec::new()));
             }
             Err(error) => job_failed(&tx, "uninstall", &log_path, &error),
         }
@@ -702,6 +657,14 @@ fn job_log(prefix: &Path, kind: &str) -> PathBuf {
     prefix
         .join("logs")
         .join(format!("{kind}-{}.log", now_epoch()))
+}
+
+/// Uninstall deletes the prefix, so its log lives in the cache.
+fn cache_log(kind: &str) -> PathBuf {
+    let base = affinity_linux_core::http::cache_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("affinity-linux"));
+    let _ = fs::create_dir_all(&base);
+    base.join(format!("{kind}-{}.log", now_epoch()))
 }
 
 /// Appends a line the core never saw to the job log. Skipped when the log
@@ -717,12 +680,11 @@ fn append_log(path: &Path, text: &str) {
 
 fn job_info(tx: &Sender<UiEvent>, log_path: &Path, text: String) {
     append_log(log_path, &text);
-    let _ = tx.send(UiEvent::Log(text, false));
-}
-
-fn job_warn(tx: &Sender<UiEvent>, log_path: &Path, text: String) {
-    append_log(log_path, &text);
-    let _ = tx.send(UiEvent::Log(text, true));
+    let _ = tx.send(UiEvent::Log {
+        text,
+        error: false,
+        status: true,
+    });
 }
 
 fn job_failed(tx: &Sender<UiEvent>, kind: &'static str, log_path: &Path, error: &anyhow::Error) {
@@ -759,8 +721,11 @@ fn apply_report(
         .filter(|dep| dep.required && !dep.found)
         .map(|dep| dep.command)
         .collect();
-    let deps = if missing.is_empty() {
+    let has_download = deps::has_download_tool(&report.deps);
+    let deps = if missing.is_empty() && has_download {
         "All present".to_string()
+    } else if missing.is_empty() {
+        "Missing: curl or wget".to_string()
     } else {
         format!("Missing: {}", missing.join(", "))
     };
@@ -772,7 +737,7 @@ fn apply_report(
     ui.set_distro_text(distro.into());
     ui.set_gpu_text(gpu.into());
     ui.set_deps_text(deps.into());
-    ui.set_deps_ok(missing.is_empty());
+    ui.set_deps_ok(missing.is_empty() && has_download);
     ui.set_wine_text(wine.clone().into());
     ui.set_prefix_text(display_path(&report.prefix).into());
     ui.set_installed(report.installed);
@@ -814,7 +779,10 @@ fn apply_report(
     if !missing.is_empty() {
         deps_line.push_str(&format!(", missing: {}", missing.join(", ")));
     }
-    push_log(logs, deps_line, !missing.is_empty());
+    if !has_download {
+        deps_line.push_str(", missing: curl or wget");
+    }
+    push_log(logs, deps_line, !missing.is_empty() || !has_download);
     for error in &report.errors {
         push_log(logs, format!("error: {error}"), true);
     }
@@ -882,7 +850,10 @@ mod tests {
     #[test]
     fn gpu_labels_use_marketing_names() {
         assert_eq!(
-            label(Vendor::Nvidia, "NVIDIA Corporation GB203 [GeForce RTX 5080]"),
+            label(
+                Vendor::Nvidia,
+                "NVIDIA Corporation GB203 [GeForce RTX 5080]"
+            ),
             "NVIDIA GeForce RTX 5080"
         );
         assert_eq!(
@@ -893,7 +864,10 @@ mod tests {
             "AMD Radeon RX 6700 XT"
         );
         assert_eq!(
-            label(Vendor::Amd, "Advanced Micro Devices, Inc. [AMD/ATI] Device 7480"),
+            label(
+                Vendor::Amd,
+                "Advanced Micro Devices, Inc. [AMD/ATI] Device 7480"
+            ),
             "AMD Device 7480"
         );
         assert_eq!(

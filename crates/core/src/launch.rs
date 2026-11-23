@@ -41,6 +41,7 @@ where
     let mut report = Report::new(opts.log_path.clone(), &mut sink);
     let wine_dir = opts.prefix.join(WINE_DIR_NAME);
     let wine = wine_dir.join("bin/wine");
+    config::validate_prefix(&opts.prefix)?;
 
     if !opts.dry_run && !app_exe(&opts.prefix).exists() {
         bail!(

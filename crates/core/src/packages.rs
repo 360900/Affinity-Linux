@@ -5,7 +5,7 @@
 //! shown in a dry run, logged, and executed with sudo or pkexec.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -53,7 +53,7 @@ pub struct PackagePlan {
 }
 
 pub fn plan(os: &OsRelease) -> PackagePlan {
-    plan_with_multilib(os, None)
+    plan_with(os, None, None)
 }
 
 fn arch_multilib_enabled() -> bool {
@@ -62,7 +62,11 @@ fn arch_multilib_enabled() -> bool {
         .unwrap_or(true)
 }
 
-fn plan_with_multilib(os: &OsRelease, multilib: Option<bool>) -> PackagePlan {
+fn is_ostree_host() -> bool {
+    Path::new("/run/ostree-booted").exists()
+}
+
+fn plan_with(os: &OsRelease, multilib: Option<bool>, ostree: Option<bool>) -> PackagePlan {
     let family = os.family();
     let id = os.id.to_ascii_lowercase();
     let mut notes = Vec::new();
@@ -73,11 +77,11 @@ fn plan_with_multilib(os: &OsRelease, multilib: Option<bool>) -> PackagePlan {
                 .to_string(),
         );
     }
-    if id.contains("bazzite") {
-        notes.push(
-            "Bazzite is an immutable distribution; automatic dependency installation is disabled."
-                .to_string(),
-        );
+    if id.contains("bazzite") || ostree.unwrap_or_else(is_ostree_host) {
+        notes.push(format!(
+            "{} is an immutable distribution; automatic dependency installation is disabled.",
+            os.name()
+        ));
         return PackagePlan {
             family,
             flavor: id,
@@ -155,14 +159,14 @@ fn ubuntu_plan(os: &OsRelease) -> (String, Vec<PackageStep>) {
             add_winehq_repo(&mut steps, "debian/dists/forky/winehq-forky.sources");
             steps.push(PackageStep::root(
                 "Install WineHQ staging and dependencies",
-                "apt-get install --install-recommends -y winehq-staging wget curl p7zip-full tar jq zstd xz-utils pciutils unzip git make",
+                "DEBIAN_FRONTEND=noninteractive apt-get install --install-recommends -y winehq-staging wget curl p7zip-full tar jq zstd xz-utils pciutils unzip git make",
             ));
             steps.push(PackageStep::root(
                 "Build winetricks from source",
                 "rm -rf /tmp/affinity-winetricks && git clone --depth=1 https://github.com/Winetricks/winetricks /tmp/affinity-winetricks && make -C /tmp/affinity-winetricks install && rm -rf /tmp/affinity-winetricks",
             ));
             steps.push(dotnet_step(
-                "apt-get install -y dotnet-sdk-8.0 dotnet-sdk-10.0",
+                "DEBIAN_FRONTEND=noninteractive apt-get install -y dotnet-sdk-8.0 dotnet-sdk-10.0",
             ));
             ("pikaos-winehq-forky".to_string(), steps)
         }
@@ -176,7 +180,7 @@ fn ubuntu_plan(os: &OsRelease) -> (String, Vec<PackageStep>) {
             add_winehq_repo(&mut steps, sources);
             steps.push(winehq_install_step(true));
             steps.push(dotnet_step(
-                "apt-get install -y dotnet-sdk-8.0 dotnet-sdk-10.0",
+                "DEBIAN_FRONTEND=noninteractive apt-get install -y dotnet-sdk-8.0 dotnet-sdk-10.0",
             ));
             (format!("mint-{major}-winehq-{codename}"), steps)
         }
@@ -190,7 +194,7 @@ fn ubuntu_plan(os: &OsRelease) -> (String, Vec<PackageStep>) {
             add_winehq_repo(&mut steps, sources);
             steps.push(winehq_install_step(true));
             steps.push(dotnet_step(
-                "apt-get install -y dotnet-sdk-8.0 dotnet-sdk-10.0",
+                "DEBIAN_FRONTEND=noninteractive apt-get install -y dotnet-sdk-8.0 dotnet-sdk-10.0",
             ));
             (format!("zorin-{major}-winehq-{codename}"), steps)
         }
@@ -198,7 +202,9 @@ fn ubuntu_plan(os: &OsRelease) -> (String, Vec<PackageStep>) {
             let mut steps = Vec::new();
             add_winehq_repo(&mut steps, "ubuntu/dists/jammy/winehq-jammy.sources");
             steps.push(winehq_install_step(true));
-            steps.push(dotnet_step("apt-get install -y dotnet-sdk-8.0"));
+            steps.push(dotnet_step(
+                "DEBIAN_FRONTEND=noninteractive apt-get install -y dotnet-sdk-8.0",
+            ));
             ("pop-winehq-jammy".to_string(), steps)
         }
         _ => {
@@ -209,7 +215,7 @@ fn ubuntu_plan(os: &OsRelease) -> (String, Vec<PackageStep>) {
                 add_winehq_repo(&mut steps, "ubuntu/dists/jammy/winehq-jammy.sources");
                 steps.push(winehq_install_step(true));
                 steps.push(dotnet_step(
-                    "apt-get install -y dotnet-sdk-8.0 dotnet-sdk-10.0",
+                    "DEBIAN_FRONTEND=noninteractive apt-get install -y dotnet-sdk-8.0 dotnet-sdk-10.0",
                 ));
                 ("ubuntu-winehq-jammy".to_string(), steps)
             }
@@ -228,16 +234,18 @@ fn ubuntu_official_plan(major: u32, minor: u32) -> (String, Vec<PackageStep>) {
     if (major, minor) >= (26, 4) {
         steps.push(PackageStep::root(
             "Install Wine and dependencies",
-            "apt-get install -y wine wine64 wine32 libwine libwine:i386 fonts-wine winetricks wget curl 7zip tar jq zstd xz-utils pciutils unzip",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y wine wine64 wine32 libwine libwine:i386 fonts-wine winetricks wget curl 7zip tar jq zstd xz-utils pciutils unzip",
         ));
-        steps.push(dotnet_step("apt-get install -y dotnet-sdk-10.0"));
+        steps.push(dotnet_step(
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y dotnet-sdk-10.0",
+        ));
     } else {
         steps.push(PackageStep::root(
             "Install Wine and dependencies",
-            "apt-get install -y wine wine64 wine32 libwine libwine:i386 fonts-wine winetricks wget curl p7zip-full tar jq zstd xz-utils pciutils unzip",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y wine wine64 wine32 libwine libwine:i386 fonts-wine winetricks wget curl p7zip-full tar jq zstd xz-utils pciutils unzip",
         ));
         steps.push(dotnet_step(
-            "apt-get install -y dotnet-sdk-8.0 dotnet-sdk-10.0",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y dotnet-sdk-8.0 dotnet-sdk-10.0",
         ));
     }
     (format!("ubuntu-{major}.{minor}-official"), steps)
@@ -265,7 +273,7 @@ fn winehq_install_step(with_winetricks: bool) -> PackageStep {
     PackageStep::root(
         "Install WineHQ staging and dependencies",
         format!(
-            "apt-get install --install-recommends -y winehq-staging {winetricks}wget curl p7zip-full tar jq zstd xz-utils pciutils unzip"
+            "DEBIAN_FRONTEND=noninteractive apt-get install --install-recommends -y winehq-staging {winetricks}wget curl p7zip-full tar jq zstd xz-utils pciutils unzip"
         ),
     )
 }
@@ -291,13 +299,13 @@ fn suse_plan() -> (String, Vec<PackageStep>) {
     (
         "opensuse".to_string(),
         vec![
-            PackageStep::root("Refresh package lists", "zypper refresh"),
+            PackageStep::root("Refresh package lists", "zypper --non-interactive refresh"),
             PackageStep::root(
                 "Install Wine and build dependencies",
-                "zypper install -y wine winetricks wget curl 7zip tar jq zstd xz pciutils unzip",
+                "zypper --non-interactive install -y wine winetricks wget curl 7zip tar jq zstd xz pciutils unzip",
             ),
-            dotnet_step("zypper install -y dotnet-sdk-10.0"),
-            dotnet_step("zypper install -y dotnet-sdk-8.0"),
+            dotnet_step("zypper --non-interactive install -y dotnet-sdk-10.0"),
+            dotnet_step("zypper --non-interactive install -y dotnet-sdk-8.0"),
         ],
     )
 }
@@ -354,9 +362,9 @@ fn vendor_opencl_plan(
     let script = match family {
         Family::Arch => Some(pacman_install("-S", pacman)),
         Family::Fedora => dnf.map(|packages| format!("dnf install -y {packages}")),
-        Family::Ubuntu | Family::Debian => {
-            apt.map(|packages| format!("apt-get install -y {packages}"))
-        }
+        Family::Ubuntu | Family::Debian => apt.map(|packages| {
+            format!("DEBIAN_FRONTEND=noninteractive apt-get install -y {packages}")
+        }),
         _ => None,
     };
     let (steps, notes) = match script {
@@ -411,7 +419,7 @@ fn amd_opencl_plan(os: &OsRelease) -> PackagePlan {
             if id == "pika" || id == "pikaos" {
                 steps.push(PackageStep::root_optional(
                     "Install AMD OpenCL packages",
-                    "apt-get install -y mesa-opencl-icd ocl-icd-libopencl1 rocm-opencl-runtime rocm-hip-runtime",
+                    "DEBIAN_FRONTEND=noninteractive apt-get install -y mesa-opencl-icd ocl-icd-libopencl1 rocm-opencl-runtime rocm-hip-runtime",
                 ));
             } else {
                 notes.push(
@@ -492,6 +500,8 @@ pub struct PlanOutcome {
     pub failed_optional: Vec<String>,
 }
 
+const OPT_FAIL_MARKER: &str = "__AFFINITY_OPT_FAIL__:";
+
 pub fn run_plan<F>(plan: &PackagePlan, opts: &PlanRunOptions, mut on_line: F) -> Result<PlanOutcome>
 where
     F: FnMut(Stream, &str),
@@ -503,6 +513,14 @@ where
             "no automatic package steps for this distribution",
         );
         return Ok(outcome);
+    }
+
+    // Batch root steps into a single pkexec invocation so polkit only prompts once.
+    if !opts.dry_run
+        && opts.elevation == Elevation::Pkexec
+        && plan.steps.iter().all(|step| step.needs_root)
+    {
+        return run_batched_pkexec(plan, opts, &mut on_line);
     }
 
     let total = plan.steps.len();
@@ -557,6 +575,73 @@ where
     Ok(outcome)
 }
 
+fn batched_pkexec_script(plan: &PackagePlan) -> String {
+    let total = plan.steps.len();
+    let mut parts = Vec::with_capacity(total * 2);
+    for (index, step) in plan.steps.iter().enumerate() {
+        let header = format!("==> [{}/{}] {}", index + 1, total, step.label);
+        parts.push(format!("printf '%s\\n' {}", shell_quote(&header)));
+        if step.optional {
+            let marker = format!("{OPT_FAIL_MARKER}{}", step.label);
+            parts.push(format!(
+                "({}) || printf '%s\\n' {} >&2",
+                step.script,
+                shell_quote(&marker)
+            ));
+        } else {
+            parts.push(format!("({}) || exit $?", step.script));
+        }
+    }
+    parts.join("\n")
+}
+
+fn run_batched_pkexec<F>(
+    plan: &PackagePlan,
+    opts: &PlanRunOptions,
+    on_line: &mut F,
+) -> Result<PlanOutcome>
+where
+    F: FnMut(Stream, &str),
+{
+    let script = batched_pkexec_script(plan);
+    let mut cmd = Command::new("pkexec");
+    cmd.arg("/bin/sh").arg("-c").arg(&script);
+    let mut run_opts = RunOptions::default()
+        .stall(Duration::from_secs(1800))
+        .log_append();
+    if let Some(path) = &opts.log_path {
+        run_opts = run_opts.log(path);
+    }
+
+    let mut failed_optional = Vec::new();
+    let result = runner::run(cmd, run_opts, |stream, line| {
+        if let Some(label) = line.strip_prefix(OPT_FAIL_MARKER) {
+            failed_optional.push(label.to_string());
+            on_line(
+                Stream::Stderr,
+                &format!("optional step failed, continuing: {label}"),
+            );
+        } else {
+            on_line(stream, line);
+        }
+    })?;
+
+    if !result.success() {
+        bail!("package installation failed\n{}", result.tail_text(15));
+    }
+
+    let completed = plan
+        .steps
+        .iter()
+        .filter(|step| !failed_optional.contains(&step.label))
+        .map(|step| step.label.clone())
+        .collect();
+    Ok(PlanOutcome {
+        completed,
+        failed_optional,
+    })
+}
+
 fn build_command(step: &PackageStep, elevation: Elevation) -> Result<Command> {
     if !step.needs_root || elevation == Elevation::None {
         let mut cmd = Command::new("sh");
@@ -589,7 +674,7 @@ mod tests {
     use super::*;
 
     fn plan_for(text: &str) -> PackagePlan {
-        plan_with_multilib(&OsRelease::parse(text), Some(true))
+        plan_with(&OsRelease::parse(text), Some(true), Some(false))
     }
 
     fn scripts(plan: &PackagePlan) -> String {
@@ -611,11 +696,11 @@ mod tests {
 
     #[test]
     fn arch_plan_adds_multilib_when_missing() {
-        let plan = plan_with_multilib(&OsRelease::parse("ID=arch\n"), Some(false));
+        let plan = plan_with(&OsRelease::parse("ID=arch\n"), Some(false), Some(false));
         assert!(plan.steps[0].script.contains("[multilib]"));
         assert!(plan.steps[0].script.contains("/etc/pacman.conf"));
 
-        let plan = plan_with_multilib(&OsRelease::parse("ID=arch\n"), Some(true));
+        let plan = plan_with(&OsRelease::parse("ID=arch\n"), Some(true), Some(false));
         assert!(!scripts(&plan).contains("[multilib]"));
     }
 
@@ -678,7 +763,8 @@ mod tests {
         assert!(scripts(&fedora).contains("p7zip-plugins"));
 
         let suse = plan_for("ID=opensuse-tumbleweed\nID_LIKE=\"opensuse suse\"\n");
-        assert!(scripts(&suse).contains("zypper install"));
+        assert!(scripts(&suse).contains("zypper --non-interactive refresh"));
+        assert!(scripts(&suse).contains("zypper --non-interactive install"));
         assert!(scripts(&suse).contains("7zip"));
     }
 
@@ -691,6 +777,29 @@ mod tests {
         let bazzite = plan_for("ID=bazzite\nID_LIKE=fedora\n");
         assert!(bazzite.steps.is_empty());
         assert!(bazzite.notes.iter().any(|note| note.contains("immutable")));
+
+        let silverblue = plan_with(
+            &OsRelease::parse("ID=fedora\nPRETTY_NAME=\"Fedora Silverblue\"\n"),
+            Some(true),
+            Some(true),
+        );
+        assert!(silverblue.steps.is_empty());
+        assert!(
+            silverblue
+                .notes
+                .iter()
+                .any(|note| note.contains("immutable"))
+        );
+    }
+
+    #[test]
+    fn batched_pkexec_combines_steps() {
+        let plan = plan_for("ID=opensuse-tumbleweed\nID_LIKE=\"opensuse suse\"\n");
+        let script = batched_pkexec_script(&plan);
+        assert!(script.contains("==> [1/4]"));
+        assert!(script.contains("==> [4/4]"));
+        assert!(script.contains("|| exit $?"));
+        assert!(script.contains(OPT_FAIL_MARKER));
     }
 
     #[test]

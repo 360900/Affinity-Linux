@@ -1,23 +1,23 @@
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
-use affinity_linux_core::app_exe;
-use affinity_linux_core::backends;
-use affinity_linux_core::config::{Config, GpuBackend, default_prefix};
+use affinity_linux_core::config::{
+    Config, GpuBackend, default_prefix, expand_home, validate_prefix,
+};
 use affinity_linux_core::deps;
 use affinity_linux_core::distro::OsRelease;
 use affinity_linux_core::doctor::{self, DoctorReport};
 use affinity_linux_core::gpu;
-use affinity_linux_core::install;
+use affinity_linux_core::http;
+use affinity_linux_core::install::{self, SetupOptions};
 use affinity_linux_core::launch;
-use affinity_linux_core::manifest::{
-    Manifest, STEP_BACKENDS, STEP_DEPS, STEP_PREFIX, STEP_WINE, STEP_WINETRICKS, StepStatus,
-    now_epoch,
-};
+use affinity_linux_core::manifest::now_epoch;
 use affinity_linux_core::packages::{self, Elevation, PlanRunOptions};
 use affinity_linux_core::runner::Stream;
 use affinity_linux_core::uninstall;
@@ -147,10 +147,10 @@ enum Command {
         #[arg(long)]
         wayland: bool,
         /// Extra arguments forwarded to the Affinity executable
-        #[arg(trailing_var_arg = true)]
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Remove the prefix, desktop entries and stored config
+    /// Remove the prefix and desktop entries, and reset the stored prefix
     Uninstall {
         /// Do not ask for confirmation
         #[arg(long)]
@@ -158,6 +158,9 @@ enum Command {
         /// Print what would be removed without deleting anything
         #[arg(long)]
         dry_run: bool,
+        /// Prefix override
+        #[arg(long)]
+        prefix: Option<PathBuf>,
     },
 }
 
@@ -217,7 +220,11 @@ fn main() -> Result<()> {
             wayland,
             args,
         } => run_launch(&cfg, dry_run, prefix, wayland, args),
-        Command::Uninstall { yes, dry_run } => run_uninstall(&cfg, yes, dry_run),
+        Command::Uninstall {
+            yes,
+            dry_run,
+            prefix,
+        } => run_uninstall(&cfg, yes, dry_run, prefix),
     }
 }
 
@@ -289,6 +296,10 @@ fn print_report(report: &DoctorReport) {
     }
 }
 
+fn resolve_prefix(prefix: Option<PathBuf>, cfg: &Config) -> PathBuf {
+    expand_home(&prefix.unwrap_or_else(|| cfg.prefix.clone()))
+}
+
 fn confirm(prompt: &str) -> Result<bool> {
     print!("{prompt} [y/N] ");
     io::stdout().flush()?;
@@ -318,8 +329,9 @@ fn run_wine_setup(
         );
     }
 
-    let os = OsRelease::detect()?;
-    let prefix = prefix.unwrap_or_else(|| cfg.prefix.clone());
+    let os = OsRelease::detect_with_override(cfg.distro_override.as_deref())?;
+    let prefix = resolve_prefix(prefix, cfg);
+    validate_prefix(&prefix)?;
 
     println!(
         "wine setup for {} ({}, prefix {})",
@@ -355,7 +367,7 @@ fn run_wine_setup(
     };
 
     let options = wine::SetupOptions {
-        prefix: prefix.clone(),
+        prefix,
         family: os.family(),
         dry_run,
         log_path,
@@ -363,10 +375,7 @@ fn run_wine_setup(
         dpi: None,
     };
 
-    let report = wine::setup(&options, |stream, line| match stream {
-        Stream::Stdout => println!("{line}"),
-        Stream::Stderr => eprintln!("{line}"),
-    })?;
+    let report = wine::setup(&options, print_stream)?;
 
     if let Some(version) = &report.wine_version {
         println!("wine    {version}");
@@ -410,13 +419,6 @@ fn print_stream(stream: Stream, line: &str) {
     }
 }
 
-fn mark_step(prefix: &Path, step: &str, status: StepStatus) {
-    if let Ok(mut manifest) = Manifest::load_or_new(prefix) {
-        manifest.mark(step, status, None);
-        let _ = manifest.save(prefix);
-    }
-}
-
 fn yes_no(value: bool) -> &'static str {
     if value { "ok" } else { "skipped" }
 }
@@ -434,8 +436,10 @@ fn run_install(
     opencl: Option<bool>,
     dpi: Option<u32>,
 ) -> Result<()> {
-    let os = OsRelease::detect()?;
-    let prefix = prefix.unwrap_or_else(|| cfg.prefix.clone());
+    let os = OsRelease::detect_with_override(cfg.distro_override.as_deref())?;
+    let prefix = resolve_prefix(prefix, cfg);
+    validate_prefix(&prefix)?;
+    let installer = installer.map(|path| expand_home(&path));
     let backend = match gpu.as_deref() {
         Some("vkd3d") => GpuBackend::Vkd3d,
         Some("dxvk") => GpuBackend::Dxvk,
@@ -482,52 +486,21 @@ fn run_install(
     let dpi = if skip_wine { None } else { resolve_dpi(dpi) };
     println!();
 
+    let options = SetupOptions {
+        prefix: prefix.clone(),
+        installer,
+        backend,
+        opencl,
+        dpi,
+        dry_run,
+        log_path: None,
+        install_deps: !skip_deps,
+        skip_wine,
+        elevation: packages::default_elevation(),
+        distro_override: cfg.distro_override.clone(),
+    };
+
     if dry_run {
-        if !skip_deps {
-            let plan = packages::plan(&os);
-            let options = PlanRunOptions {
-                dry_run: true,
-                elevation: packages::default_elevation(),
-                log_path: None,
-            };
-            packages::run_plan(&plan, &options, print_stream)?;
-        }
-        if !skip_wine {
-            let options = wine::SetupOptions {
-                prefix: prefix.clone(),
-                family: os.family(),
-                dry_run: true,
-                log_path: None,
-                wine_version: None,
-                dpi,
-            };
-            wine::setup(&options, print_stream)?;
-        }
-        if opencl {
-            let plan = packages::opencl_plan(&os, render);
-            for note in &plan.notes {
-                println!("note: {note}");
-            }
-            let options = PlanRunOptions {
-                dry_run: true,
-                elevation: packages::default_elevation(),
-                log_path: None,
-            };
-            packages::run_plan(&plan, &options, print_stream)?;
-        }
-        let backend_options = backends::BackendOptions {
-            prefix: prefix.clone(),
-            backend,
-            dry_run: true,
-            log_path: None,
-        };
-        backends::install(&backend_options, print_stream)?;
-        let options = install::InstallOptions {
-            prefix,
-            installer,
-            dry_run: true,
-            log_path: None,
-        };
         install::install(&options, print_stream)?;
         return Ok(());
     }
@@ -543,133 +516,27 @@ fn run_install(
     let log_path = log_dir.join(format!("install-{}.log", now_epoch()));
     println!("  log       {}", log_path.display());
 
+    let cancel_prefetch = Arc::new(AtomicBool::new(false));
     let prefetch = {
         let log_path = log_path.clone();
-        let with_installer = installer.is_none();
-        std::thread::spawn(move || install::prefetch(Some(log_path), with_installer, print_stream))
+        let with_installer = options.installer.is_none();
+        let cancel = cancel_prefetch.clone();
+        std::thread::spawn(move || {
+            install::prefetch_cancellable(
+                Some(log_path),
+                with_installer,
+                Some(cancel),
+                print_stream,
+            )
+        })
     };
 
-    if !skip_deps {
-        let checks = deps::check_all();
-        let missing = deps::missing(&checks);
-        if missing.is_empty() {
-            println!("dependencies are already present");
-        } else {
-            println!(
-                "installing missing dependencies: {}",
-                missing
-                    .iter()
-                    .map(|dep| dep.command)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            let plan = packages::plan(&os);
-            if plan.steps.is_empty() {
-                println!("warning: no automatic dependency plan for this distribution");
-            } else {
-                let elevation = packages::default_elevation();
-                if elevation == Elevation::Sudo && deps::which("sudo").is_none() {
-                    bail!("sudo is missing; install the dependencies manually or run as root");
-                }
-                let options = PlanRunOptions {
-                    dry_run: false,
-                    elevation,
-                    log_path: Some(log_path.clone()),
-                };
-                packages::run_plan(&plan, &options, print_stream)?;
-            }
-        }
-    }
-
-    if !skip_deps && opencl {
-        let plan = packages::opencl_plan(&os, render);
-        for note in &plan.notes {
-            println!("note: {note}");
-        }
-        if !plan.steps.is_empty() {
-            let elevation = packages::default_elevation();
-            if elevation == Elevation::Sudo && deps::which("sudo").is_none() {
-                println!("warning: sudo is missing; skipping the OpenCL driver");
-            } else {
-                let options = PlanRunOptions {
-                    dry_run: false,
-                    elevation,
-                    log_path: Some(log_path.clone()),
-                };
-                let outcome = packages::run_plan(&plan, &options, print_stream)?;
-                if !outcome.failed_optional.is_empty() {
-                    println!(
-                        "warning: optional OpenCL steps failed: {}",
-                        outcome.failed_optional.join(", ")
-                    );
-                }
-            }
-        }
-    }
-
-    if !skip_wine {
-        let options = wine::SetupOptions {
-            prefix: prefix.clone(),
-            family: os.family(),
-            dry_run: false,
-            log_path: Some(log_path.clone()),
-            wine_version: None,
-            dpi,
-        };
-        let setup = wine::setup(&options, print_stream)?;
-        if let Some(version) = &setup.wine_version {
-            println!("wine      {version}");
-        }
-        if !setup.failed_components.is_empty() {
-            println!(
-                "warning: components failed: {}",
-                setup.failed_components.join(", ")
-            );
-        }
-        mark_step(&prefix, STEP_DEPS, StepStatus::Done);
-        mark_step(&prefix, STEP_PREFIX, StepStatus::Done);
-        mark_step(&prefix, STEP_WINE, StepStatus::Done);
-        mark_step(&prefix, STEP_WINETRICKS, StepStatus::Done);
-    }
-
-    let registry = fs::read_to_string(prefix.join("system.reg")).unwrap_or_default();
-    if !wine::has_dotnet48(&registry) {
-        bail!(
-            ".NET Framework 4.8 is not registered in {}; run `affinity-linux wine-setup` first",
-            prefix.display()
-        );
-    }
-
-    let backend_options = backends::BackendOptions {
-        prefix: prefix.clone(),
-        backend,
-        dry_run: false,
-        log_path: Some(log_path.clone()),
-    };
-    match backends::install(&backend_options, print_stream) {
-        Ok(result) => {
-            if let Some(version) = &result.vkd3d_version {
-                println!("vkd3d    {version}");
-            }
-            if let Some(version) = &result.dxvk_version {
-                println!("dxvk     {version}");
-            }
-            mark_step(&prefix, STEP_BACKENDS, StepStatus::Done);
-        }
-        Err(error) => {
-            println!("warning: GPU backend setup failed: {error}");
-            mark_step(&prefix, STEP_BACKENDS, StepStatus::Failed);
-        }
-    }
-
-    let options = install::InstallOptions {
-        prefix: prefix.clone(),
-        installer,
-        dry_run: false,
-        log_path: Some(log_path.clone()),
-    };
+    let mut options = options;
+    options.log_path = Some(log_path);
+    let outcome = install::install(&options, print_stream);
+    cancel_prefetch.store(true, Ordering::Relaxed);
     let _ = prefetch.join();
-    let outcome = install::install(&options, print_stream)?;
+    let outcome = outcome?;
     print_outcome(&outcome);
 
     let mut saved = cfg.clone();
@@ -681,7 +548,16 @@ fn run_install(
     Ok(())
 }
 
-fn print_outcome(outcome: &install::InstallReport) {
+fn print_outcome(outcome: &install::SetupReport) {
+    if let Some(version) = &outcome.wine_version {
+        println!("  wine          {version}");
+    }
+    if let Some(version) = &outcome.vkd3d_version {
+        println!("  vkd3d         {version}");
+    }
+    if let Some(version) = &outcome.dxvk_version {
+        println!("  dxvk          {version}");
+    }
     if outcome.used_setup_ui {
         println!("note: the silent install failed; the Affinity setup window was used");
     }
@@ -700,23 +576,6 @@ fn print_outcome(outcome: &install::InstallReport) {
     }
 }
 
-fn ensure_installed(prefix: &Path) -> Result<()> {
-    if !app_exe(prefix).exists() {
-        bail!(
-            "Affinity is not installed in {}; run `affinity-linux install` first",
-            prefix.display()
-        );
-    }
-    let registry = fs::read_to_string(prefix.join("system.reg")).unwrap_or_default();
-    if !wine::has_dotnet48(&registry) {
-        bail!(
-            ".NET Framework 4.8 is missing from {}; reinstall with `affinity-linux install`",
-            prefix.display()
-        );
-    }
-    Ok(())
-}
-
 fn run_update(
     cfg: &Config,
     dry_run: bool,
@@ -724,16 +583,18 @@ fn run_update(
     prefix: Option<PathBuf>,
     installer: Option<PathBuf>,
 ) -> Result<()> {
-    let prefix = prefix.unwrap_or_else(|| cfg.prefix.clone());
+    let prefix = resolve_prefix(prefix, cfg);
+    validate_prefix(&prefix)?;
+    if !dry_run {
+        install::ensure_installed(&prefix)?;
+    }
+    let installer = installer.map(|path| expand_home(&path));
     println!("update Affinity v3");
     println!("  prefix    {}", prefix.display());
 
-    if !dry_run {
-        ensure_installed(&prefix)?;
-        if !yes && !confirm(&format!("Update Affinity in {}?", prefix.display()))? {
-            println!("aborted");
-            return Ok(());
-        }
+    if !dry_run && !yes && !confirm(&format!("Update Affinity in {}?", prefix.display()))? {
+        println!("aborted");
+        return Ok(());
     }
 
     let log_path = if dry_run {
@@ -746,13 +607,20 @@ fn run_update(
         Some(path)
     };
 
-    let options = install::InstallOptions {
+    let options = SetupOptions {
         prefix: prefix.clone(),
         installer,
+        backend: cfg.gpu_backend,
+        opencl: false,
+        dpi: None,
         dry_run,
         log_path,
+        install_deps: false,
+        skip_wine: true,
+        elevation: packages::default_elevation(),
+        distro_override: cfg.distro_override.clone(),
     };
-    let outcome = install::install(&options, print_stream)?;
+    let outcome = install::update(&options, print_stream)?;
     print_outcome(&outcome);
 
     if !dry_run {
@@ -770,17 +638,18 @@ fn run_repair(
     prefix: Option<PathBuf>,
     dpi: Option<u32>,
 ) -> Result<()> {
-    let prefix = prefix.unwrap_or_else(|| cfg.prefix.clone());
+    let prefix = resolve_prefix(prefix, cfg);
+    validate_prefix(&prefix)?;
+    if !dry_run {
+        install::ensure_installed(&prefix)?;
+    }
     println!("repair Affinity v3");
     println!("  prefix    {}", prefix.display());
     let dpi = resolve_dpi(dpi);
 
-    if !dry_run {
-        ensure_installed(&prefix)?;
-        if !yes && !confirm(&format!("Repair Affinity in {}?", prefix.display()))? {
-            println!("aborted");
-            return Ok(());
-        }
+    if !dry_run && !yes && !confirm(&format!("Repair Affinity in {}?", prefix.display()))? {
+        println!("aborted");
+        return Ok(());
     }
 
     let log_path = if dry_run {
@@ -793,37 +662,19 @@ fn run_repair(
         Some(path)
     };
 
-    if let Some(dpi) = dpi
-        && let Err(error) = wine::apply_dpi(&prefix, dpi, dry_run, log_path.clone(), print_stream)
-    {
-        println!("warning: could not set the Wine DPI: {error:#}");
-    }
-
-    let backend_options = backends::BackendOptions {
-        prefix: prefix.clone(),
-        backend: cfg.gpu_backend,
-        dry_run,
-        log_path: log_path.clone(),
-    };
-    match backends::install(&backend_options, print_stream) {
-        Ok(_) => {
-            if !dry_run {
-                mark_step(&prefix, STEP_BACKENDS, StepStatus::Done);
-            }
-        }
-        Err(error) => {
-            println!("warning: GPU backend setup failed: {error}");
-            if !dry_run {
-                mark_step(&prefix, STEP_BACKENDS, StepStatus::Failed);
-            }
-        }
-    }
-
-    let options = install::InstallOptions {
+    let render = gpu::render_vendor(&prefix);
+    let options = SetupOptions {
         prefix,
         installer: None,
+        backend: cfg.gpu_backend,
+        opencl: cfg.opencl_enabled(render),
+        dpi,
         dry_run,
         log_path,
+        install_deps: false,
+        skip_wine: true,
+        elevation: packages::default_elevation(),
+        distro_override: cfg.distro_override.clone(),
     };
     let outcome = install::repair(&options, print_stream)?;
     print_outcome(&outcome);
@@ -837,13 +688,19 @@ fn run_launch(
     wayland: bool,
     args: Vec<String>,
 ) -> Result<()> {
-    let prefix = prefix.unwrap_or_else(|| cfg.prefix.clone());
+    let prefix = resolve_prefix(prefix, cfg);
+    validate_prefix(&prefix)?;
+    if !dry_run {
+        install::ensure_installed(&prefix)?;
+    }
     let log_path = if dry_run {
         None
     } else {
         let log_dir = prefix.join("logs");
         fs::create_dir_all(&log_dir)?;
-        Some(log_dir.join(format!("launch-{}.log", now_epoch())))
+        let path = log_dir.join("launch.log");
+        let _ = fs::write(&path, b"");
+        Some(path)
     };
     let options = launch::LaunchOptions {
         prefix,
@@ -860,8 +717,9 @@ fn run_launch(
     Ok(())
 }
 
-fn run_uninstall(cfg: &Config, yes: bool, dry_run: bool) -> Result<()> {
-    let prefix = cfg.prefix.clone();
+fn run_uninstall(cfg: &Config, yes: bool, dry_run: bool, prefix: Option<PathBuf>) -> Result<()> {
+    let prefix = resolve_prefix(prefix, cfg);
+    validate_prefix(&prefix)?;
     if !dry_run
         && !yes
         && !confirm(&format!(
@@ -874,12 +732,10 @@ fn run_uninstall(cfg: &Config, yes: bool, dry_run: bool) -> Result<()> {
     }
     let log_path = if dry_run {
         None
-    } else if prefix.exists() {
-        let log_dir = prefix.join("logs");
+    } else {
+        let log_dir = http::cache_dir()?.join("logs");
         fs::create_dir_all(&log_dir)?;
         Some(log_dir.join(format!("uninstall-{}.log", now_epoch())))
-    } else {
-        None
     };
     let options = uninstall::UninstallOptions {
         prefix: prefix.clone(),
@@ -890,9 +746,12 @@ fn run_uninstall(cfg: &Config, yes: bool, dry_run: bool) -> Result<()> {
     if dry_run {
         return Ok(());
     }
-    let mut saved = cfg.clone();
-    saved.prefix = default_prefix();
-    saved.save()?;
+    if prefix == cfg.prefix {
+        let mut saved = cfg.clone();
+        saved.prefix = default_prefix();
+        saved.save()?;
+        println!("install location reset to {}", saved.prefix.display());
+    }
     println!(
         "removed {} desktop entr{}, prefix removed={}",
         outcome.removed_entries,
@@ -907,7 +766,7 @@ fn run_uninstall(cfg: &Config, yes: bool, dry_run: bool) -> Result<()> {
 }
 
 fn run_deps(cfg: &Config, dry_run: bool, yes: bool, pkexec: bool) -> Result<()> {
-    let os = OsRelease::detect()?;
+    let os = OsRelease::detect_with_override(cfg.distro_override.as_deref())?;
     let plan = packages::plan(&os);
 
     println!(
@@ -924,24 +783,16 @@ fn run_deps(cfg: &Config, dry_run: bool, yes: bool, pkexec: bool) -> Result<()> 
     if plan.steps.is_empty() {
         let checks = deps::check_all();
         let missing = deps::missing(&checks);
-        if missing.is_empty() {
+        let has_download = deps::has_download_tool(&checks);
+        if missing.is_empty() && has_download {
             println!("all required dependencies are present");
             return Ok(());
         }
         bail!(
             "no automatic plan for this distribution; still missing: {}",
-            missing
-                .iter()
-                .map(|dep| dep.command)
-                .collect::<Vec<_>>()
-                .join(", ")
+            install::format_missing_deps(&missing, has_download)
         );
     }
-
-    let print_line = |stream: Stream, line: &str| match stream {
-        Stream::Stdout => println!("{line}"),
-        Stream::Stderr => eprintln!("{line}"),
-    };
 
     if dry_run {
         let options = PlanRunOptions {
@@ -949,7 +800,7 @@ fn run_deps(cfg: &Config, dry_run: bool, yes: bool, pkexec: bool) -> Result<()> 
             elevation: packages::default_elevation(),
             log_path: None,
         };
-        packages::run_plan(&plan, &options, print_line)?;
+        packages::run_plan(&plan, &options, print_stream)?;
         return Ok(());
     }
 
@@ -975,6 +826,7 @@ fn run_deps(cfg: &Config, dry_run: bool, yes: bool, pkexec: bool) -> Result<()> 
         _ => {}
     }
 
+    validate_prefix(&cfg.prefix)?;
     let log_dir = cfg.prefix.join("logs");
     fs::create_dir_all(&log_dir)?;
     let log_path = log_dir.join(format!("deps-{}.log", now_epoch()));
@@ -985,7 +837,7 @@ fn run_deps(cfg: &Config, dry_run: bool, yes: bool, pkexec: bool) -> Result<()> 
         elevation,
         log_path: Some(log_path),
     };
-    let outcome = packages::run_plan(&plan, &options, print_line)?;
+    let outcome = packages::run_plan(&plan, &options, print_stream)?;
     println!("completed {} steps", outcome.completed.len());
     if !outcome.failed_optional.is_empty() {
         println!(
@@ -996,17 +848,14 @@ fn run_deps(cfg: &Config, dry_run: bool, yes: bool, pkexec: bool) -> Result<()> 
 
     let checks = deps::check_all();
     let missing = deps::missing(&checks);
-    if missing.is_empty() {
+    let has_download = deps::has_download_tool(&checks);
+    if missing.is_empty() && has_download {
         println!("all required dependencies are present");
         Ok(())
     } else {
         bail!(
             "still missing: {}",
-            missing
-                .iter()
-                .map(|dep| dep.command)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+            install::format_missing_deps(&missing, has_download)
+        )
     }
 }

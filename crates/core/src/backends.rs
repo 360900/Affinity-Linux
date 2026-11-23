@@ -17,7 +17,7 @@ use crate::http;
 use crate::journal::Report;
 use crate::manifest::now_epoch;
 use crate::runner::{self, RunOptions, Stream};
-use crate::{WINE_DIR_NAME, app_exe};
+use crate::{WINE_DIR_NAME, app_exe, wine};
 
 pub const VKD3D_REPO: &str = "HansKristian-Work/vkd3d-proton";
 pub const VKD3D_FALLBACK_VERSION: &str = "3.0a";
@@ -79,8 +79,8 @@ where
         );
     }
 
-    let envs = wine_env(&opts.prefix, &wine_dir);
-    let _ = kill_prefix(&wine_dir, &envs, &mut report);
+    let envs = wine::wine_env(&opts.prefix, &wine_dir, "-all,fixme-all");
+    wine::kill_prefix(&opts.prefix, Some(&wine_dir), &mut report);
 
     match opts.backend {
         GpuBackend::Vkd3d => match install_vkd3d(&opts.prefix, &wine_dir, &mut report) {
@@ -101,7 +101,7 @@ where
         },
     }
 
-    let _ = kill_prefix(&wine_dir, &envs, &mut report);
+    wine::kill_prefix(&opts.prefix, Some(&wine_dir), &mut report);
 
     let _ = config::write_prefix_state(
         &opts.prefix,
@@ -296,9 +296,9 @@ fn ensure_vkd3d(prefix: &Path, version: &str, report: &mut Report<'_>) -> Result
 }
 
 fn install_dxvk(prefix: &Path, wine_dir: &Path, report: &mut Report<'_>) -> Result<Option<String>> {
-    let envs = wine_env(prefix, wine_dir);
+    let envs = wine::wine_env(prefix, wine_dir, "-all,fixme-all");
     let system32 = prefix.join("drive_c/windows/system32");
-    let _ = kill_prefix(wine_dir, &envs, report);
+    wine::kill_prefix(prefix, Some(wine_dir), report);
 
     if which("winetricks").is_some() {
         report.info("installing DXVK via winetricks");
@@ -318,7 +318,7 @@ fn install_dxvk(prefix: &Path, wine_dir: &Path, report: &mut Report<'_>) -> Resu
             )),
             Err(error) => report.warn(format!("winetricks dxvk failed: {error}")),
         }
-        let _ = kill_prefix(wine_dir, &envs, report);
+        wine::kill_prefix(prefix, Some(wine_dir), report);
     } else {
         report.warn("winetricks not found; installing DXVK manually");
     }
@@ -388,7 +388,11 @@ fn ensure_dxvk(
         }
         fs::create_dir_all(&cache)?;
         let mut tar = Command::new("tar");
-        tar.arg("-xzf").arg(&archive).arg("-C").arg(&cache);
+        tar.arg("-xzf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&cache)
+            .arg("--no-same-owner");
         run_checked(
             report,
             tar,
@@ -451,7 +455,11 @@ fn extract_tar_zst(destination: &Path, archive: &Path, report: &mut Report<'_>) 
     )?;
 
     let mut tar = Command::new("tar");
-    tar.arg("-xf").arg(&tar_path).arg("-C").arg(destination);
+    tar.arg("-xf")
+        .arg(&tar_path)
+        .arg("-C")
+        .arg(destination)
+        .arg("--no-same-owner");
     let result = run_checked(
         report,
         tar,
@@ -485,33 +493,6 @@ fn set_override(report: &mut Report<'_>, wine: &Path, envs: &[(String, String)],
         )),
         Err(error) => report.warn(format!("could not set DLL override {name}: {error}")),
     }
-}
-
-fn wine_env(prefix: &Path, wine_dir: &Path) -> Vec<(String, String)> {
-    let path = std::env::var("PATH").unwrap_or_default();
-    vec![
-        ("WINEPREFIX".into(), prefix.display().to_string()),
-        ("WINEDEBUG".into(), "-all,fixme-all".into()),
-        ("WINESERVER_TIMEOUT".into(), "60".into()),
-        ("WINETRICKS_GUI".into(), "none".into()),
-        ("PATH".into(), format!("{}/bin:{path}", wine_dir.display())),
-    ]
-}
-
-fn kill_prefix(wine_dir: &Path, envs: &[(String, String)], report: &mut Report<'_>) -> Result<()> {
-    let wineserver = wine_dir.join("bin/wineserver");
-    let mut cmd = if wineserver.exists() {
-        Command::new(wineserver)
-    } else {
-        Command::new("wineserver")
-    };
-    cmd.arg("-k");
-    let mut opts = RunOptions::default().stall(Duration::from_secs(30)).quiet();
-    for (key, value) in envs {
-        opts = opts.env(key.clone(), value.clone());
-    }
-    let _ = runner::run(cmd, opts, |stream, line| report.line(stream, line));
-    Ok(())
 }
 
 fn run(

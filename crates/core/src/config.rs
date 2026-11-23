@@ -79,6 +79,54 @@ impl Config {
     }
 }
 
+/// Reject locations that are clearly not a private Wine prefix. The
+/// uninstaller deletes this directory recursively, so a typo must not erase
+/// the home directory or a system tree.
+pub fn validate_prefix(path: &Path) -> Result<()> {
+    if path.as_os_str().is_empty() {
+        anyhow::bail!("the prefix path is empty");
+    }
+    if !path.is_absolute() {
+        anyhow::bail!("the prefix must be an absolute path: {}", path.display());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        anyhow::bail!("the prefix must not contain '..': {}", path.display());
+    }
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let home = home_dir();
+    let home_resolved = home.canonicalize().unwrap_or_else(|_| home.clone());
+    let forbidden = [
+        "/", "/home", "/root", "/usr", "/etc", "/var", "/opt", "/boot", "/srv", "/tmp",
+    ];
+    if forbidden.iter().any(|dir| resolved == Path::new(dir))
+        || resolved == home
+        || resolved == home_resolved
+    {
+        anyhow::bail!("refusing to use {} as the Affinity prefix", path.display());
+    }
+    Ok(())
+}
+
+/// A directory this tool (or Wine) created. The uninstaller uses this to
+/// refuse deleting a folder it does not recognise.
+pub fn looks_like_prefix(path: &Path) -> bool {
+    path.join("system.reg").is_file()
+        || path.join("drive_c").is_dir()
+        || path.join(crate::WINE_DIR_NAME).exists()
+        || fs::read_dir(path)
+            .map(|entries| {
+                entries.flatten().any(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with("ElementalWarrior-wine-") && entry.path().is_dir()
+                })
+            })
+            .unwrap_or(false)
+}
+
 pub fn config_dir() -> PathBuf {
     match env::var_os("XDG_CONFIG_HOME") {
         Some(base) if !base.is_empty() => PathBuf::from(base).join(crate::APP_NAME),
@@ -183,6 +231,25 @@ mod tests {
         assert_eq!(expand_home(Path::new("~")), home);
         assert_eq!(expand_home(Path::new("~/x")), home.join("x"));
         assert_eq!(expand_home(Path::new("/abs")), PathBuf::from("/abs"));
+    }
+
+    #[test]
+    fn refuses_dangerous_prefixes() {
+        for path in ["/", "/home", "/usr", "/tmp", "/etc"] {
+            assert!(validate_prefix(Path::new(path)).is_err(), "{path}");
+        }
+        assert!(validate_prefix(Path::new("relative")).is_err());
+        assert!(validate_prefix(Path::new("/home/../home")).is_err());
+        assert!(validate_prefix(&home_dir()).is_err());
+        assert!(validate_prefix(&home_dir().join(".AffinityLinux")).is_ok());
+    }
+
+    #[test]
+    fn recognises_a_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!looks_like_prefix(dir.path()));
+        fs::create_dir_all(dir.path().join("drive_c")).unwrap();
+        assert!(looks_like_prefix(dir.path()));
     }
 
     #[test]

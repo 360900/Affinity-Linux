@@ -7,6 +7,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -16,7 +18,7 @@ use crate::http;
 use crate::journal::Report;
 use crate::manifest::now_epoch;
 use crate::runner::{self, RunOptions, RunResult, Stream};
-use crate::{WINE_DIR_NAME, app_exe, seven_zip_out};
+use crate::{WINE_DIR_NAME, app_exe, seven_zip_out, wine};
 
 pub const INSTALLER_URL: &str = "https://downloads.affinity.studio/Affinity%20x64.exe";
 pub const INSTALLER_NAME: &str = "Affinity-x64.exe";
@@ -64,8 +66,8 @@ where
         });
     }
 
-    let envs = wine_env(&opts.prefix, &wine_dir);
-    let _ = kill_prefix(&wine_dir, &envs, &mut report);
+    let envs = wine::wine_env(&opts.prefix, &wine_dir, "-all");
+    wine::kill_prefix(&opts.prefix, Some(&wine_dir), &mut report);
 
     let mut winecfg = Command::new(wine_dir.join("bin/winecfg"));
     winecfg.args(["-v", "win11"]);
@@ -117,12 +119,16 @@ where
 }
 
 /// The latest Affinity setup, from the shared download cache.
-pub(crate) fn fetch_installer(report: &mut Report<'_>) -> Result<PathBuf> {
-    http::download_cached(
+pub(crate) fn fetch_installer(
+    report: &mut Report<'_>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<PathBuf> {
+    http::download_cached_cancellable(
         report,
         INSTALLER_URL,
         INSTALLER_NAME,
         Duration::from_secs(300),
+        cancel,
     )
 }
 
@@ -140,7 +146,7 @@ fn resolve_installer(opts: &InstallerOptions, report: &mut Report<'_>) -> Result
         // Older versions kept a 650 MB copy inside the prefix.
         let _ = fs::remove_file(directory.join(INSTALLER_NAME));
         let _ = fs::remove_dir(&directory);
-        return fetch_installer(report);
+        return fetch_installer(report, None);
     };
 
     let destination = directory.join(
@@ -177,7 +183,7 @@ fn dry_run(
     wine_dir: &Path,
     report: &mut Report<'_>,
 ) {
-    let envs = wine_env(&opts.prefix, wine_dir);
+    let envs = wine::wine_env(&opts.prefix, wine_dir, "-all");
     for (program, args) in [
         (wine_dir.join("bin/winecfg"), vec!["-v", "win11"]),
         (wine_dir.join("bin/wineserver"), vec!["-k"]),
@@ -251,7 +257,7 @@ fn msi_install(
     };
     report.info(format!("installing embedded package {}", msi.display()));
 
-    let envs = wine_env(prefix, wine_dir);
+    let envs = wine::wine_env(prefix, wine_dir, "-all");
     let mut wait = Command::new(wine_dir.join("bin/wineserver"));
     wait.arg("-w");
     let _ = run(report, wait, &envs, Duration::from_secs(120));
@@ -305,13 +311,6 @@ fn largest_msi(directory: &Path) -> Result<PathBuf> {
         .context("no MSI package was found in the extracted setup")
 }
 
-fn kill_prefix(wine_dir: &Path, envs: &[(String, String)], report: &mut Report<'_>) -> Result<()> {
-    let mut cmd = Command::new(wine_dir.join("bin/wineserver"));
-    cmd.arg("-k");
-    let _ = run(report, cmd, envs, Duration::from_secs(30));
-    Ok(())
-}
-
 fn run(
     report: &mut Report<'_>,
     cmd: Command,
@@ -323,19 +322,6 @@ fn run(
         options = options.env(key.clone(), value.clone());
     }
     runner::run(cmd, options, |stream, line| report.line(stream, line))
-}
-
-fn wine_env(prefix: &Path, wine_dir: &Path) -> Vec<(String, String)> {
-    let path = std::env::var("PATH").unwrap_or_default();
-    vec![
-        ("WINEPREFIX".into(), prefix.display().to_string()),
-        ("WINEDEBUG".into(), "-all".into()),
-        ("WINESERVER_TIMEOUT".into(), "60".into()),
-        (
-            "PATH".into(),
-            format!("{}:{path}", wine_dir.join("bin").display()),
-        ),
-    ]
 }
 
 fn to_windows_path(path: &Path) -> String {

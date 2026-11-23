@@ -3,6 +3,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -12,7 +14,7 @@ use crate::http;
 use crate::journal::Report;
 use crate::manifest::now_epoch;
 use crate::runner::{self, RunOptions, RunResult, Stream};
-use crate::{WINE_DIR_NAME, seven_zip_out};
+use crate::{WINE_DIR_NAME, seven_zip_out, wine};
 
 const DOTNET48_URL: &str = "https://download.visualstudio.microsoft.com/download/pr/7afca223-55d2-470a-8edc-6a1739ae3252/abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe";
 const DOTNET48_SHA256: &str = "95889d6de3f2070c07790ad6cf2000d33d9a1bdfc6a381725ab82ab1c314fd53";
@@ -318,14 +320,15 @@ where
     }
 
     if !installed {
-        if which("wine").is_none() {
-            report.warn("skipping WebView2: wine is missing");
+        let wine_dir = prefix.join(WINE_DIR_NAME);
+        let wine_bin = wine_dir.join("bin/wine");
+        if !wine_bin.is_file() {
+            report.warn("skipping WebView2: Wine is missing");
             return Ok(false);
         }
-        let installer = fetch_webview2(&mut report)?;
-        let wine = prefix.join(WINE_DIR_NAME).join("bin/wine");
-        let envs = wine_env(prefix);
-        let mut cmd = Command::new(&wine);
+        let installer = fetch_webview2(&mut report, None)?;
+        let envs = wine::wine_env(prefix, &wine_dir, "-all,fixme-all");
+        let mut cmd = Command::new(&wine_bin);
         cmd.arg(&installer);
         let _ = run(&mut report, cmd, &envs, Duration::from_secs(1800));
     }
@@ -341,28 +344,32 @@ where
 }
 
 fn apply_webview2_registry(prefix: &Path, report: &mut Report<'_>) -> Result<()> {
-    let wine = prefix.join(WINE_DIR_NAME).join("bin/wine");
-    let envs = wine_env(prefix);
+    let wine_dir = prefix.join(WINE_DIR_NAME);
+    let wine_bin = wine_dir.join("bin/wine");
+    let envs = wine::wine_env(prefix, &wine_dir, "-all,fixme-all");
     let entries = [
         (
             "HKLM\\System\\CurrentControlSet\\Services\\edgeupdate",
             "Start",
+            "REG_DWORD",
             "4",
         ),
         (
             "HKLM\\System\\CurrentControlSet\\Services\\edgeupdatem",
             "Start",
+            "REG_DWORD",
             "4",
         ),
         (
             "HKCU\\Software\\Wine\\AppDefaults\\msedgewebview2.exe",
             "Version",
+            "REG_SZ",
             "win11",
         ),
     ];
-    for (key, name, value) in entries {
-        let mut cmd = Command::new(&wine);
-        cmd.args(["reg", "add", key, "/v", name, "/d", value, "/f"]);
+    for (key, name, kind, value) in entries {
+        let mut cmd = Command::new(&wine_bin);
+        cmd.args(["reg", "add", key, "/v", name, "/t", kind, "/d", value, "/f"]);
         let _ = run(report, cmd, &envs, Duration::from_secs(60));
     }
     Ok(())
@@ -406,12 +413,16 @@ fn dotnet48_cache_path() -> Result<PathBuf> {
 }
 
 /// The WebView2 installer, from the shared download cache.
-pub(crate) fn fetch_webview2(report: &mut Report<'_>) -> Result<PathBuf> {
-    http::download_cached(
+pub(crate) fn fetch_webview2(
+    report: &mut Report<'_>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<PathBuf> {
+    http::download_cached_cancellable(
         report,
         WEBVIEW2_URL,
         "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
         Duration::from_secs(300),
+        cancel,
     )
 }
 
@@ -451,20 +462,6 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn wine_env(prefix: &Path) -> Vec<(String, String)> {
-    let wine_dir = prefix.join(WINE_DIR_NAME);
-    let path = std::env::var("PATH").unwrap_or_default();
-    vec![
-        ("WINEPREFIX".into(), prefix.display().to_string()),
-        ("WINEDEBUG".into(), "-all,fixme-all".into()),
-        ("WINESERVER_TIMEOUT".into(), "60".into()),
-        (
-            "PATH".into(),
-            format!("{}:{path}", wine_dir.join("bin").display()),
-        ),
-    ]
 }
 
 fn run(

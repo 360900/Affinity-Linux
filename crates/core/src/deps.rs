@@ -149,6 +149,14 @@ pub fn missing(checks: &[DepCheck]) -> Vec<&DepCheck> {
     checks.iter().filter(|c| c.required && !c.found).collect()
 }
 
+/// Both download tools absent means the installer cannot fetch Wine or
+/// Affinity, so treat that as a missing dependency too.
+pub fn has_download_tool(checks: &[DepCheck]) -> bool {
+    checks
+        .iter()
+        .any(|c| (c.command == "curl" || c.command == "wget") && c.found)
+}
+
 /// Vulkan ICD manifests discovered in the common system directories.
 pub fn vulkan_icds() -> Vec<String> {
     const DIRS: [&str; 2] = ["/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d"];

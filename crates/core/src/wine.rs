@@ -63,6 +63,25 @@ where
     let mut report = Report::new(opts.log_path.clone(), &mut sink);
     let prefix = &opts.prefix;
 
+    crate::config::validate_prefix(prefix)?;
+    if !opts.dry_run
+        && prefix.exists()
+        && !crate::config::looks_like_prefix(prefix)
+        && fs::read_dir(prefix)
+            .map(|entries| {
+                entries.flatten().any(|entry| {
+                    let name = entry.file_name();
+                    name != std::ffi::OsStr::new("logs")
+                        && name != std::ffi::OsStr::new(crate::manifest::MANIFEST_FILE)
+                })
+            })
+            .unwrap_or(false)
+    {
+        bail!(
+            "{} is not empty and does not look like a Wine prefix; choose another folder",
+            prefix.display()
+        );
+    }
     report.info(format!("Wine setup for {}", prefix.display()));
 
     let mut backup = None;
@@ -79,7 +98,7 @@ where
                 destination.display()
             ));
         } else {
-            kill_prefix(prefix, None, &mut report)?;
+            kill_prefix(prefix, None, &mut report);
             if let Some(parent) = prefix.parent() {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("creating {}", parent.display()))?;
@@ -119,11 +138,11 @@ where
         ));
     } else {
         report.info("initializing the Wine prefix");
-        kill_prefix(prefix, Some(&wine_dir), &mut report)?;
+        kill_prefix(prefix, Some(&wine_dir), &mut report);
         let mut cmd = Command::new(wine_dir.join("bin/wineboot"));
         cmd.arg("-u");
         let mut run_opts = stream_opts(Some(Duration::from_secs(900)));
-        run_opts.envs = wine_env(prefix, &wine_dir);
+        run_opts.envs = wine_setup_env(prefix, &wine_dir);
         let result = run_logged(&mut report, cmd, run_opts)?;
         if !result.success() {
             bail!("wineboot failed\n{}", result.tail_text(20));
@@ -243,9 +262,9 @@ fn install_components(prefix: &Path, dry_run: bool, report: &mut Report) -> Resu
             continue;
         }
 
-        kill_prefix(prefix, Some(&wine_dir), report)?;
+        kill_prefix(prefix, Some(&wine_dir), report);
         let mut run_opts = stream_opts(Some(Duration::from_secs(1200)));
-        run_opts.envs = wine_env(prefix, &wine_dir);
+        run_opts.envs = wine_setup_env(prefix, &wine_dir);
         let result = run_logged(report, cmd, run_opts)?;
 
         if result.success() {
@@ -258,7 +277,7 @@ fn install_components(prefix: &Path, dry_run: bool, report: &mut Report) -> Resu
             };
             report.warn(format!("{component} {reason}; continuing"));
             failed.push(component.to_string());
-            kill_prefix(prefix, Some(&wine_dir), report)?;
+            kill_prefix(prefix, Some(&wine_dir), report);
         }
     }
 
@@ -275,11 +294,11 @@ fn configure_prefix(prefix: &Path, dry_run: bool, report: &mut Report) -> Result
     } else if !winecfg.is_file() {
         report.warn(format!("{} is missing", winecfg.display()));
     } else {
-        kill_prefix(prefix, Some(&wine_dir), report)?;
+        kill_prefix(prefix, Some(&wine_dir), report);
         let mut cmd = Command::new(&winecfg);
         cmd.args(["-v", "win11"]);
         let mut run_opts = stream_opts(Some(Duration::from_secs(300)));
-        run_opts.envs = wine_env(prefix, &wine_dir);
+        run_opts.envs = wine_setup_env(prefix, &wine_dir);
         let result = run_logged(report, cmd, run_opts)?;
         if !result.success() {
             report.warn("winecfg failed to set Windows 11; continuing");
@@ -301,7 +320,7 @@ fn configure_prefix(prefix: &Path, dry_run: bool, report: &mut Report) -> Result
         return Ok(());
     }
 
-    if let Err(error) = download(report, THEME_URL, &theme_path) {
+    if let Err(error) = http::download(report, THEME_URL, &theme_path, Duration::from_secs(120)) {
         report.warn(format!("dark theme download failed: {error:#}"));
         return Ok(());
     }
@@ -311,7 +330,7 @@ fn configure_prefix(prefix: &Path, dry_run: bool, report: &mut Report) -> Result
         let mut cmd = Command::new(&regedit);
         cmd.arg(&theme_path);
         let mut run_opts = stream_opts(Some(Duration::from_secs(120)));
-        run_opts.envs = wine_env(prefix, &wine_dir);
+        run_opts.envs = wine_setup_env(prefix, &wine_dir);
         let result = run_logged(report, cmd, run_opts)?;
         if !result.success() {
             report.warn("dark theme import failed; continuing");
@@ -429,7 +448,7 @@ fn set_dpi(prefix: &Path, dpi: u32, dry_run: bool, report: &mut Report) -> Resul
         return Ok(());
     }
     let mut run_opts = stream_opts(Some(Duration::from_secs(120)));
-    run_opts.envs = wine_env(prefix, &wine_dir);
+    run_opts.envs = wine_setup_env(prefix, &wine_dir);
     let result = run_logged(report, cmd, run_opts)?;
     if !result.success() {
         report.warn("could not set the Wine DPI; continuing");
@@ -456,7 +475,7 @@ fn ensure_wine(
 ) -> Result<String> {
     if let Some(existing) = detect_installed_build(prefix) {
         let compatible = requested
-            .map(|requested| existing.starts_with(requested))
+            .map(|requested| existing == requested)
             .unwrap_or(true);
         if compatible {
             report.info(format!("using existing Wine {existing}"));
@@ -580,15 +599,19 @@ fn install_wine(
         };
 
         report.info(format!("extracting Wine {version}"));
+        let staging = prefix.join(format!(".wine-extract-{version}"));
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
         let mut cmd = Command::new("tar");
         cmd.args(["-xJf"])
             .arg(&archive)
             .arg("-C")
-            .arg(prefix)
+            .arg(&staging)
             .args(["--no-same-owner", "--overwrite"]);
         let run_opts = stream_opts(Some(Duration::from_secs(1800)));
         let result = run_logged(report, cmd, run_opts)?;
         if !result.success() {
+            let _ = fs::remove_dir_all(&staging);
             // Likely a damaged download; fetch it again next time.
             let _ = fs::remove_file(&archive);
             report.warn(format!(
@@ -599,7 +622,8 @@ fn install_wine(
             continue;
         }
 
-        let Some(dir) = find_wine_dir(prefix, version) else {
+        let Some(staged_dir) = find_wine_dir(&staging, version) else {
+            let _ = fs::remove_dir_all(&staging);
             report.warn(format!(
                 "Wine {version} archive did not contain {}",
                 release.dir_pattern
@@ -607,6 +631,19 @@ fn install_wine(
             errors.push(format!("{version}: archive layout not recognized"));
             continue;
         };
+
+        let dir_name = staged_dir
+            .file_name()
+            .context("extracted Wine directory name")?
+            .to_os_string();
+        let dir = prefix.join(dir_name);
+        if dir.exists() {
+            let _ = fs::remove_dir_all(&dir);
+        }
+        let move_res = fs::rename(&staged_dir, &dir)
+            .with_context(|| format!("moving {} to {}", staged_dir.display(), dir.display()));
+        let _ = fs::remove_dir_all(&staging);
+        move_res?;
 
         link_wine(prefix, &dir)?;
         verify_wine(prefix, dry_run, report)?;
@@ -690,7 +727,7 @@ fn verify_wine(prefix: &Path, dry_run: bool, report: &mut Report) -> Result<()> 
     let mut cmd = Command::new(&wine);
     cmd.arg("--version");
     let mut run_opts = stream_opts(Some(Duration::from_secs(120)));
-    run_opts.envs = wine_env(prefix, &prefix.join(WINE_DIR_NAME));
+    run_opts.envs = wine_setup_env(prefix, &prefix.join(WINE_DIR_NAME));
     let result = run_logged(report, cmd, run_opts)?;
     if !result.success() {
         bail!(
@@ -702,55 +739,13 @@ fn verify_wine(prefix: &Path, dry_run: bool, report: &mut Report) -> Result<()> 
     Ok(())
 }
 
-fn download(report: &mut Report, url: &str, destination: &Path) -> Result<()> {
-    if destination.exists() {
-        let _ = fs::remove_file(destination);
-    }
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-
-    let cmd = if deps::which("curl").is_some() {
-        let mut cmd = Command::new("curl");
-        cmd.args([
-            "-fL",
-            "--retry",
-            "3",
-            "--retry-delay",
-            "2",
-            "--connect-timeout",
-            "30",
-            "--progress-bar",
-            "-o",
-        ]);
-        cmd.arg(destination).arg(url);
-        cmd
-    } else if deps::which("wget").is_some() {
-        let mut cmd = Command::new("wget");
-        cmd.args(["--tries=3", "-O"]).arg(destination).arg(url);
-        cmd
-    } else {
-        bail!("neither curl nor wget was found on PATH");
-    };
-
-    let run_opts = stream_opts(None);
-    let result = run_logged(report, cmd, run_opts)?;
-    if !result.success() {
-        bail!("download failed\n{}", result.tail_text(10));
-    }
-    if !destination.is_file() {
-        bail!("download did not create {}", destination.display());
-    }
-    Ok(())
-}
-
-fn kill_prefix(prefix: &Path, wine_dir: Option<&Path>, report: &mut Report) -> Result<()> {
+pub(crate) fn kill_prefix(prefix: &Path, wine_dir: Option<&Path>, report: &mut Report) {
     let wineserver = wine_dir
         .map(|dir| dir.join("bin/wineserver"))
         .filter(|path| path.is_file())
         .or_else(|| deps::which("wineserver"));
     let Some(wineserver) = wineserver else {
-        return Ok(());
+        return;
     };
 
     let mut cmd = Command::new(wineserver);
@@ -760,23 +755,39 @@ fn kill_prefix(prefix: &Path, wine_dir: Option<&Path>, report: &mut Report) -> R
     run_opts
         .envs
         .push(("WINEPREFIX".into(), prefix.display().to_string()));
-    let _ = run_logged(report, cmd, run_opts)?;
-    Ok(())
+    let _ = run_logged(report, cmd, run_opts);
 }
 
-fn wine_env(prefix: &Path, wine_dir: &Path) -> Vec<(String, String)> {
+pub(crate) fn wine_env(prefix: &Path, wine_dir: &Path, debug: &str) -> Vec<(String, String)> {
     let path = std::env::var("PATH").unwrap_or_default();
     vec![
         ("WINEPREFIX".into(), prefix.display().to_string()),
-        ("WINEDEBUG".into(), "-all,fixme-all".into()),
-        ("WINEDLLOVERRIDES".into(), "mscoree=;mshtml=".into()),
+        ("WINEDEBUG".into(), debug.into()),
         ("WINESERVER_TIMEOUT".into(), "60".into()),
         ("WINETRICKS_GUI".into(), "none".into()),
+        (
+            "WINEDLLPATH".into(),
+            wine_dir.join("lib/wine").display().to_string(),
+        ),
+        (
+            "WINE".into(),
+            wine_dir.join("bin/wine").display().to_string(),
+        ),
+        (
+            "WINESERVER".into(),
+            wine_dir.join("bin/wineserver").display().to_string(),
+        ),
         (
             "PATH".into(),
             format!("{}:{path}", wine_dir.join("bin").display()),
         ),
     ]
+}
+
+fn wine_setup_env(prefix: &Path, wine_dir: &Path) -> Vec<(String, String)> {
+    let mut envs = wine_env(prefix, wine_dir, "-all,fixme-all");
+    envs.push(("WINEDLLOVERRIDES".into(), "mscoree=;mshtml=".into()));
+    envs
 }
 
 /// No log file here: `run_logged` already writes every line through the report.

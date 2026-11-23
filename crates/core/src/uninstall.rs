@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use crate::desktop;
 use crate::journal::Report;
 use crate::runner::{self, RunOptions, Stream};
-use crate::{WINE_DIR_NAME, config};
+use crate::{WINE_DIR_NAME, config, wine};
 
 #[derive(Debug, Clone)]
 pub struct UninstallOptions {
@@ -30,9 +31,22 @@ where
     F: FnMut(Stream, &str),
 {
     let mut sink = on_line;
-    let mut report = Report::new(opts.log_path.clone(), &mut sink);
+    // A log inside the prefix would be deleted with it, and writing the final
+    // lines would recreate the directory we just removed.
+    let log_path = opts
+        .log_path
+        .clone()
+        .filter(|path| !path.starts_with(&opts.prefix));
+    let mut report = Report::new(log_path, &mut sink);
     let mut outcome = UninstallOutcome::default();
 
+    config::validate_prefix(&opts.prefix)?;
+    if !opts.dry_run && opts.prefix.exists() && !config::looks_like_prefix(&opts.prefix) {
+        bail!(
+            "{} does not look like a Wine prefix; refusing to delete it",
+            opts.prefix.display()
+        );
+    }
     report.info(format!(
         "Uninstalling Affinity from {}",
         opts.prefix.display()
@@ -53,14 +67,20 @@ where
     stop_prefix(&opts.prefix, &mut report);
 
     for path in desktop_files() {
-        if path.exists() {
-            match fs::remove_file(&path) {
-                Ok(()) => {
-                    outcome.removed_entries += 1;
-                    report.info(format!("removed {}", path.display()));
-                }
-                Err(error) => report.warn(format!("could not remove {}: {error}", path.display())),
+        let Ok(metadata) = path.symlink_metadata() else {
+            continue;
+        };
+        let result = if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => {
+                outcome.removed_entries += 1;
+                report.info(format!("removed {}", path.display()));
             }
+            Err(error) => report.warn(format!("could not remove {}: {error}", path.display())),
         }
     }
     if outcome.removed_entries > 0 {
@@ -77,7 +97,7 @@ where
             if fs::remove_dir_all(&opts.prefix).is_err() {
                 report.warn("retry failed; falling back to rm -rf");
                 let _ = Command::new("rm")
-                    .arg("-rf")
+                    .args(["-rf", "--"])
                     .arg(&opts.prefix)
                     .status()
                     .context("running rm -rf")?;
@@ -95,32 +115,14 @@ where
         report.info("prefix not found; nothing to delete");
     }
 
-    let reset = config::default_prefix();
-    report.info(format!("install location reset to {}", reset.display()));
+    report.info("Files saved outside the prefix were kept");
     Ok(outcome)
 }
 
 fn stop_prefix(prefix: &Path, report: &mut Report<'_>) {
     let wine_dir = prefix.join(WINE_DIR_NAME);
-    let wineserver = if wine_dir.join("bin/wineserver").exists() {
-        wine_dir.join("bin/wineserver")
-    } else {
-        PathBuf::from("wineserver")
-    };
-    if wineserver == Path::new("wineserver") && crate::deps::which("wineserver").is_none() {
-        return;
-    }
-    let mut cmd = Command::new(&wineserver);
-    cmd.arg("-k");
-    cmd.env("WINEPREFIX", prefix);
-    match runner::run(
-        cmd,
-        RunOptions::default().stall(Duration::from_secs(30)).quiet(),
-        |stream, line| report.line(stream, line),
-    ) {
-        Ok(_) => std::thread::sleep(Duration::from_millis(800)),
-        Err(error) => report.warn(format!("could not stop Wine processes: {error}")),
-    }
+    wine::kill_prefix(prefix, Some(&wine_dir), report);
+    std::thread::sleep(Duration::from_millis(800));
 }
 
 fn refresh_desktop_database(report: &mut Report<'_>) {
@@ -145,7 +147,9 @@ fn make_writable(path: &Path) {
     if metadata.file_type().is_symlink() {
         return;
     }
-    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o777));
+    let add = if metadata.is_dir() { 0o700 } else { 0o600 };
+    let mode = metadata.permissions().mode() | add;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
     if metadata.is_dir()
         && let Ok(entries) = fs::read_dir(path)
     {
@@ -189,8 +193,8 @@ fn desktop_files() -> Vec<PathBuf> {
     ] {
         files.push(apps.join("wine/Programs").join(name));
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        files.push(PathBuf::from(home).join("Desktop/Affinity.desktop"));
+    if let Some(desktop) = desktop::desktop_dir() {
+        files.push(desktop.join("Affinity.desktop"));
     }
     files
 }
@@ -223,5 +227,16 @@ mod tests {
     fn applications_dir_stays_under_xdg_or_home() {
         let dir = applications_dir().expect("applications dir");
         assert!(dir.ends_with("applications"));
+    }
+
+    #[test]
+    fn make_writable_keeps_files_non_world_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("readonly");
+        fs::write(&file, b"x").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o400)).unwrap();
+        make_writable(&file);
+        let mode = fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

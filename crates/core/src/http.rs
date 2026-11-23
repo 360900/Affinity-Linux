@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -60,12 +61,28 @@ pub(crate) fn download_cached(
     name: &str,
     stall: Duration,
 ) -> Result<PathBuf> {
+    download_cached_cancellable(report, url, name, stall, None)
+}
+
+pub(crate) fn download_cached_cancellable(
+    report: &mut Report<'_>,
+    url: &str,
+    name: &str,
+    stall: Duration,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<PathBuf> {
     let path = cache_dir()?.join(name);
     // A background prefetch may be fetching the same file.
     let lock = file_lock(&path);
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cancel
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::Relaxed))
+    {
+        bail!("download cancelled");
+    }
     if !path.is_file() {
-        download(report, url, &path, stall)?;
+        download_with_cancel(report, url, &path, stall, cancel)?;
         return Ok(path);
     }
     if which("curl").is_none() {
@@ -84,7 +101,7 @@ pub(crate) fn download_cached(
         .arg("-o")
         .arg(&partial)
         .arg(url);
-    match run(report, cmd, stall) {
+    match run_with_cancel(report, cmd, stall, cancel.clone()) {
         // On 304 Not Modified curl writes no file.
         Ok(true)
             if partial
@@ -101,6 +118,12 @@ pub(crate) fn download_cached(
         }
         _ => {
             let _ = std::fs::remove_file(&partial);
+            if cancel
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Relaxed))
+            {
+                bail!("download cancelled");
+            }
             report.warn(format!(
                 "could not check for a newer {name}; using the cached copy"
             ));
@@ -152,6 +175,16 @@ pub(crate) fn download(
     destination: &Path,
     stall: Duration,
 ) -> Result<()> {
+    download_with_cancel(report, url, destination, stall, None)
+}
+
+fn download_with_cancel(
+    report: &mut Report<'_>,
+    url: &str,
+    destination: &Path,
+    stall: Duration,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<()> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
@@ -165,8 +198,14 @@ pub(crate) fn download(
     ));
     report.info(format!("downloading {url}"));
 
+    let has_curl = which("curl").is_some();
+    let has_wget = which("wget").is_some();
+    if !has_curl && !has_wget {
+        bail!("curl or wget is required to download {url}");
+    }
+
     let mut last_error = String::new();
-    if which("curl").is_some() {
+    if has_curl {
         let mut cmd = Command::new("curl");
         cmd.args(CURL_DOWNLOAD)
             // Keep the server's timestamp so `download_cached` can revalidate.
@@ -174,22 +213,41 @@ pub(crate) fn download(
             .arg("-o")
             .arg(&partial)
             .arg(url);
-        match run(report, cmd, stall) {
+        match run_with_cancel(report, cmd, stall, cancel.clone()) {
             Ok(true) => return finish(partial, destination),
             Ok(false) => last_error = "curl failed".to_string(),
             Err(error) => last_error = error.to_string(),
         }
+        if cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            let _ = std::fs::remove_file(&partial);
+            bail!("download cancelled");
+        }
     }
 
-    if which("wget").is_some() {
+    if has_wget {
         let mut cmd = Command::new("wget");
         cmd.args(["--tries=3", "--timeout=30", "-U", USER_AGENT, "-O"])
             .arg(&partial)
             .arg(url);
-        match run(report, cmd, stall) {
+        match run_with_cancel(report, cmd, stall, cancel.clone()) {
             Ok(true) => return finish(partial, destination),
-            Ok(false) => last_error = format!("{last_error}; wget failed"),
-            Err(error) => last_error = format!("{last_error}; {error}"),
+            Ok(false) => {
+                last_error = if last_error.is_empty() {
+                    "wget failed".to_string()
+                } else {
+                    format!("{last_error}; wget failed")
+                };
+            }
+            Err(error) => {
+                last_error = if last_error.is_empty() {
+                    error.to_string()
+                } else {
+                    format!("{last_error}; {error}")
+                };
+            }
         }
     }
 
@@ -197,10 +255,17 @@ pub(crate) fn download(
     bail!("could not download {url}: {last_error}");
 }
 
-fn run(report: &mut Report<'_>, cmd: Command, stall: Duration) -> Result<bool> {
-    let result = runner::run(cmd, RunOptions::default().stall(stall), |stream, line| {
-        report.line(stream, line)
-    })?;
+fn run_with_cancel(
+    report: &mut Report<'_>,
+    cmd: Command,
+    stall: Duration,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<bool> {
+    let mut options = RunOptions::default().stall(stall);
+    if let Some(flag) = cancel {
+        options = options.cancel(flag);
+    }
+    let result = runner::run(cmd, options, |stream, line| report.line(stream, line))?;
     Ok(result.success())
 }
 
