@@ -1,24 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <title>Affinity</title>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>Affinity Linux</title>
   <defs>
-    <linearGradient id="tile-bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#192419"/>
-      <stop offset="100%" stop-color="#101711"/>
+    <linearGradient id="liquid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d4fc8f"/>
+      <stop offset=".45" stop-color="#9be15a"/>
+      <stop offset="1" stop-color="#6cc63a"/>
     </linearGradient>
-    <radialGradient id="tile-glow" cx="50%" cy="52%" r="48%">
-      <stop offset="0%" stop-color="#A8F568" stop-opacity="0.16"/>
-      <stop offset="65%" stop-color="#8BE04E" stop-opacity="0.04"/>
-      <stop offset="100%" stop-color="#8BE04E" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="mark-grad" x1="0" y1="0" x2="0.3" y2="1">
-      <stop offset="0%" stop-color="#BFFB7A"/>
-      <stop offset="100%" stop-color="#85DF4E"/>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#c0bfbc"/>
     </linearGradient>
   </defs>
-  <rect x="16" y="16" width="224" height="224" rx="52" fill="url(#tile-bg)"/>
-  <rect x="16" y="16" width="224" height="224" rx="52" fill="url(#tile-glow)"/>
-  <rect x="17" y="17" width="222" height="222" rx="51" fill="none" stroke="rgba(180,248,114,0.16)" stroke-width="2"/>
-  <g transform="translate(18 16) scale(0.9333333333)">
-    <path d="M112.908,165.979c-10.413,0 -17.037,-6.317 -17.037,-14.329c0,-34.287 90.164,-41.151 90.164,-77.563c0,-22.213 -25.731,-31.787 -58.577,-31.787c-19.98,0 -42.571,3.698 -63.552,10.315l0,43.438c30.919,-22.52 65.272,-32.16 87.4,-32.16c13.914,0 23.355,3.882 23.355,10.838c0,28.658 -124.353,24.117 -124.353,86.042c0,23.736 16.321,37.335 39.283,37.335c34.732,0 61.003,-33.753 80.657,-74.897l3.982,1.43c-10.351,25.143 -31.771,52.712 -35.943,70.434l44.715,0l0,-91.685l-10.327,0c-14.99,32.574 -36.957,62.59 -59.767,62.59" fill="url(#mark-grad)"/>
-  </g>
+  <ellipse cx="64" cy="110" rx="31" ry="8.5" fill="#5e5c64"/>
+  <ellipse cx="64" cy="106" rx="30" ry="8" fill="url(#glass)" stroke="#77767b" stroke-width="2"/>
+  <path d="M57 74 H71 V104 H57 Z" fill="url(#glass)" stroke="#77767b" stroke-width="2"/>
+  <path d="M28 12 H100 C103 42 92 70 64 76 C36 70 25 42 28 12 Z" fill="url(#glass)"/>
+  <path d="M29.63 40 C37.63 54 50 50 64 40 S92 26 98.37 40 C94.03 57.91 82.88 71.96 64 76 C45.12 71.96 33.97 57.91 29.63 40 Z" fill="url(#liquid)"/>
+  <path d="M29.63 40 C37.63 54 50 50 64 40 S92 26 98.37 40" fill="none" stroke="#e8ffc4" stroke-width="3"/>
+  <path d="M38 22 C38 40 42 54 50 62" fill="none" stroke="#ffffff" stroke-opacity=".7" stroke-width="5" stroke-linecap="round"/>
+  <path d="M28 12 H100 C103 42 92 70 64 76 C36 70 25 42 28 12 Z" fill="none" stroke="#77767b" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M44 54.3 L84 25.7" stroke="#3d7a1c" stroke-width="2.5" stroke-linecap="round"/>
+  <circle cx="44" cy="54.3" r="4.5" fill="#ffffff" stroke="#3d7a1c" stroke-width="2.5"/>
+  <circle cx="84" cy="25.7" r="4.5" fill="#ffffff" stroke="#3d7a1c" stroke-width="2.5"/>
+  <rect x="58.5" y="34.5" width="11" height="11" rx="2" fill="#ffffff" stroke="#3d7a1c" stroke-width="2.5"/>
 </svg>
