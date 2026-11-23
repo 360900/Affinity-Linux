@@ -1,14 +1,24 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Affinity</title>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#4f6ef7"/>
-      <stop offset="1" stop-color="#7a3ff2"/>
+    <linearGradient id="tile-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#192419"/>
+      <stop offset="100%" stop-color="#101711"/>
+    </linearGradient>
+    <radialGradient id="tile-glow" cx="50%" cy="52%" r="48%">
+      <stop offset="0%" stop-color="#A8F568" stop-opacity="0.16"/>
+      <stop offset="65%" stop-color="#8BE04E" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#8BE04E" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="mark-grad" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0%" stop-color="#BFFB7A"/>
+      <stop offset="100%" stop-color="#85DF4E"/>
     </linearGradient>
   </defs>
-  <rect x="16" y="16" width="224" height="224" rx="48" fill="url(#bg)"/>
-  <g fill="none" stroke="#fff" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M128 60v92"/>
-    <path d="M90 116l38 38 38-38"/>
-    <path d="M70 160v26h116v-26"/>
+  <rect x="16" y="16" width="224" height="224" rx="52" fill="url(#tile-bg)"/>
+  <rect x="16" y="16" width="224" height="224" rx="52" fill="url(#tile-glow)"/>
+  <rect x="17" y="17" width="222" height="222" rx="51" fill="none" stroke="rgba(180,248,114,0.16)" stroke-width="2"/>
+  <g transform="translate(18 16) scale(0.9333333333)">
+    <path d="M112.908,165.979c-10.413,0 -17.037,-6.317 -17.037,-14.329c0,-34.287 90.164,-41.151 90.164,-77.563c0,-22.213 -25.731,-31.787 -58.577,-31.787c-19.98,0 -42.571,3.698 -63.552,10.315l0,43.438c30.919,-22.52 65.272,-32.16 87.4,-32.16c13.914,0 23.355,3.882 23.355,10.838c0,28.658 -124.353,24.117 -124.353,86.042c0,23.736 16.321,37.335 39.283,37.335c34.732,0 61.003,-33.753 80.657,-74.897l3.982,1.43c-10.351,25.143 -31.771,52.712 -35.943,70.434l44.715,0l0,-91.685l-10.327,0c-14.99,32.574 -36.957,62.59 -59.767,62.59" fill="url(#mark-grad)"/>
   </g>
 </svg>
