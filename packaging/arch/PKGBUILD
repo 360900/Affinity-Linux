@@ -9,6 +9,7 @@ license=('GPL-3.0-or-later')
 depends=('fontconfig' 'gcc-libs' 'glibc' 'libxkbcommon' 'libglvnd')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+# Run `updpkgsums` after tagging a release.
 sha256sums=('SKIP')
 
 prepare() {

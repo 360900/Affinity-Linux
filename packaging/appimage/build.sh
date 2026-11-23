@@ -8,6 +8,8 @@ cd "$root"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
 appdir="target/appimage/AppDir"
 tool="target/appimage/appimagetool"
+tool_version="1.9.1"
+tool_sha256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
 
 rm -rf "$appdir"
 make DESTDIR="$appdir" PREFIX=/usr install
@@ -19,9 +21,10 @@ ln -sf affinity-linux.svg "$appdir/.DirIcon"
 ln -sf io.github._360900.AffinityLinux.metainfo.xml \
     "$appdir/usr/share/metainfo/io.github._360900.AffinityLinux.appdata.xml"
 
-if [ ! -x "$tool" ]; then
+if [ ! -x "$tool" ] || ! printf '%s  %s\n' "$tool_sha256" "$tool" | sha256sum -c --status -; then
     curl -fsSL -o "$tool" \
-        https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+        "https://github.com/AppImage/appimagetool/releases/download/$tool_version/appimagetool-x86_64.AppImage"
+    printf '%s  %s\n' "$tool_sha256" "$tool" | sha256sum -c -
     chmod 755 "$tool"
 fi
 
